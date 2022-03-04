@@ -51,8 +51,9 @@ var (
 	}
 
 	flagAddress = flag.String("a", defaultAddr, "server address:port")
-	flagLog     = flag.Bool("log", false, "enable verbose logging")
 	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
+	flagLog     = flag.Bool("log", false, "enable verbose logging")
+	flagTempDir = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin")
 )
 
 type server struct {
@@ -69,10 +70,10 @@ type offeredFile struct {
 func main() {
 	flag.Parse()
 
+	// TODO check flags values before using them, add a checkFlags() func.
 	// TODO Content-Disposition filename and custom filename with -f flag.
 	// TODO Cache headers?
 	// TODO disable file buffering with -b 0 ?
-	// TODO flag for changing tmp folder.
 	// TODO flag for keeping tmp files.
 	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
@@ -106,7 +107,7 @@ func run() error {
 	case len(flag.Args()) == 0:
 		fallthrough
 	case len(flag.Args()) == 1 && flag.Args()[0] == "-":
-		if of, err = offerStdin(*flagBufSize); err != nil {
+		if of, err = offerStdin(*flagBufSize, *flagTempDir); err != nil {
 			return err
 		}
 	case len(flag.Args()) == 1:
@@ -147,7 +148,7 @@ func run() error {
 	return nil
 }
 
-func offerStdin(bufSize int) (offeredFile, error) {
+func offerStdin(bufSize int, tempDir string) (offeredFile, error) {
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
 		name := fmt.Sprintf("%s-%d", progName, time.Now().Unix())
@@ -156,7 +157,7 @@ func offerStdin(bufSize int) (offeredFile, error) {
 	if !errors.Is(err, errTooBig) {
 		return offeredFile{}, fmt.Errorf("tryReadAll: %w", err)
 	}
-	tmp, err := os.CreateTemp("", progName+"-*")
+	tmp, err := os.CreateTemp(tempDir, fmt.Sprintf("%s-*", progName))
 	if err != nil {
 		return offeredFile{}, err
 	}
