@@ -52,8 +52,9 @@ var (
 
 	flagAddress = flag.String("a", defaultAddr, "server address:port")
 	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
+	flagKeep    = flag.Bool("k", false, "don't remove stored stdin file")
 	flagLog     = flag.Bool("log", false, "enable verbose logging")
-	flagTempDir = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin")
+	flagTempDir = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 )
 
 type server struct {
@@ -74,7 +75,6 @@ func main() {
 	// TODO Content-Disposition filename and custom filename with -f flag.
 	// TODO Cache headers?
 	// TODO disable file buffering with -b 0 ?
-	// TODO flag for keeping tmp files.
 	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
 	// TODO basic authentication with -u flag?
@@ -141,7 +141,7 @@ func run() error {
 	log.Println("waiting for active connections")
 	<-waitConns
 
-	if of.isTemp {
+	if of.isTemp && !*flagKeep {
 		log.Printf("removing %s", of.name)
 		return os.Remove(of.name)
 	}
