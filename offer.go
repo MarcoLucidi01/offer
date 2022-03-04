@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +27,9 @@ import (
 const (
 	progName = "offer"
 	progRepo = "https://github.com/MarcoLucidi01/offer"
+
+	defaultAddr    = ":8080"
+	defaultBufSize = 20 * (1 << 20) // MiB
 )
 
 var (
@@ -35,10 +39,10 @@ var (
 	errIsDir          = errors.New("is a directory")
 	errTooBig         = errors.New("too big")
 	errTooManyFiles   = errors.New("too many files")
-	errUnknownAlgo    = errors.New("unknown algorithm")
+	errUnknownAlgo    = errors.New("unknown hash algorithm")
 
-	flagAddress = flag.String("a", ":8080", "address:port")
-	flagBufSize = flag.Int("b", 1024, "buffer size")
+	flagAddress = flag.String("a", defaultAddr, "server address:port")
+	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
 
 	hashes = map[string]func() hash.Hash{
 		"md5":    md5.New,
@@ -68,6 +72,7 @@ func main() {
 	// TODO Cache headers?
 	// TODO disable file buffering with -b 0 ?
 	// TODO flag for changing tmp folder.
+	// TODO flag for keeping tmp files.
 	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
 	// TODO basic authentication with -u flag?
@@ -75,6 +80,7 @@ func main() {
 	//      allow only one request and disable checksums. useful to avoid
 	//      to write big files on disk if it's only needed once.
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
+	// TODO handle range requests? maybe would be better to use http.ServeContent()
 
 	if err := run(); err != nil {
 		fmt.Fprintf(os.Stderr, "%s: %s\n", progName, err)
@@ -110,7 +116,7 @@ func run() error {
 
 	srv := &server{file: of}
 	srv.Addr = *flagAddress
-	http.HandleFunc("/", srv.offerFile())
+	http.Handle("/", srv.offerFile())
 	http.Handle("/checksums/", http.StripPrefix("/checksums/", srv.checksums()))
 
 	waitIdleConns := make(chan struct{})
@@ -243,7 +249,7 @@ func (srv *server) checksums() http.HandlerFunc {
 				http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 				return
 			}
-			fmtSum := fmt.Sprintf("%s %x %s\n", algo, sum, srv.file.name)
+			fmtSum := fmt.Sprintf("%s %x %s\n", algo, sum, path.Base(srv.file.name))
 			cache.Store(algo, fmtSum)
 			io.Copy(w, strings.NewReader(fmtSum))
 			return
@@ -265,7 +271,7 @@ func (srv *server) checksums() http.HandlerFunc {
 				http.Error(w, http.StatusText(500), 500)
 				return
 			}
-			fmtSum := fmt.Sprintf("%s %x %s\n", a, sum, srv.file.name)
+			fmtSum := fmt.Sprintf("%s %x %s\n", a, sum, path.Base(srv.file.name))
 			cache.Store(a, fmtSum)
 			fmtSums.WriteString(fmtSum)
 		}
