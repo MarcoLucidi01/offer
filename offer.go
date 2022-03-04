@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -41,15 +43,16 @@ var (
 	errTooManyFiles   = errors.New("too many files")
 	errUnknownAlgo    = errors.New("unknown hash algorithm")
 
-	flagAddress = flag.String("a", defaultAddr, "server address:port")
-	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
-
 	hashes = map[string]func() hash.Hash{
 		"md5":    md5.New,
 		"sha1":   sha1.New,
 		"sha256": sha256.New,
 		"sha512": sha512.New,
 	}
+
+	flagAddress = flag.String("a", defaultAddr, "server address:port")
+	flagLog     = flag.Bool("log", false, "enable verbose logging")
+	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
 )
 
 type server struct {
@@ -66,9 +69,7 @@ type offeredFile struct {
 func main() {
 	flag.Parse()
 
-	// TODO verbose logging.
 	// TODO Content-Disposition filename and custom filename with -f flag.
-	// TODO Server header.
 	// TODO Cache headers?
 	// TODO disable file buffering with -b 0 ?
 	// TODO flag for changing tmp folder.
@@ -82,7 +83,13 @@ func main() {
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
 
+	if !*flagLog {
+		log.SetOutput(io.Discard)
+	}
+	log.Printf("%s %s pid %d", progName, progVersion, os.Getpid())
+
 	if err := run(); err != nil {
+		log.Println(err)
 		fmt.Fprintf(os.Stderr, "%s: %s\n", progName, err)
 		os.Exit(1)
 	}
@@ -90,7 +97,7 @@ func main() {
 
 func run() error {
 	if *flagBufSize <= 0 {
-		return errInvalidBufSize
+		return fmt.Errorf("%d: %w", *flagBufSize, errInvalidBufSize)
 	}
 
 	var of offeredFile
@@ -110,29 +117,33 @@ func run() error {
 		return errTooManyFiles
 	}
 
-	if of.isTemp {
-		defer os.Remove(of.name)
-	}
-
 	srv := &server{file: of}
 	srv.Addr = *flagAddress
+	srv.Handler = srv.wrap(http.DefaultServeMux)
 	http.Handle("/", srv.offerFile())
 	http.Handle("/checksums/", http.StripPrefix("/checksums/", srv.checksums()))
 
-	waitIdleConns := make(chan struct{})
+	waitConns := make(chan struct{})
 	go func() {
-		sigint := make(chan os.Signal, 1)
-		signal.Notify(sigint, os.Interrupt)
-		<-sigint
+		sigch := make(chan os.Signal, 1)
+		signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
+		sig := <-sigch
+		log.Printf("got signal %q shutting down", sig)
 		if err := srv.Shutdown(context.Background()); err != nil {
-			// TODO log
+			log.Println(err)
 		}
-		close(waitIdleConns)
+		close(waitConns)
 	}()
 	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}
-	<-waitIdleConns
+	log.Println("waiting for active connections")
+	<-waitConns
+
+	if of.isTemp {
+		log.Printf("removing %s", of.name)
+		return os.Remove(of.name)
+	}
 	return nil
 }
 
@@ -158,6 +169,7 @@ func offerStdin(bufSize int) (offeredFile, error) {
 		os.Remove(tmp.Name())
 		return offeredFile{}, err
 	}
+	log.Printf("saved stdin to %s", tmp.Name())
 	return offeredFile{name: tmp.Name(), isTemp: true}, nil
 }
 
@@ -227,9 +239,24 @@ func (of offeredFile) checksum(algo string) ([]byte, error) {
 	return h.Sum(nil), nil
 }
 
+func (srv *server) wrap(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
+
+		w.Header().Add("Server", fmt.Sprintf("%s %s", progName, progVersion))
+
+		h.ServeHTTP(w, r)
+	})
+}
+
 func (srv *server) offerFile() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		srv.file.copyTo(w)
+		if n, err := srv.file.copyTo(w); err != nil {
+			log.Println(err)
+			if n == 0 {
+				http.Error(w, http.StatusText(404), 404)
+			}
+		}
 	}
 }
 
@@ -246,7 +273,12 @@ func (srv *server) checksums() http.HandlerFunc {
 		if algo != "" {
 			sum, err := srv.file.checksum(algo)
 			if err != nil {
-				http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
+				log.Println(err)
+				status := 500
+				if errors.Is(err, errUnknownAlgo) {
+					status = 404
+				}
+				http.Error(w, http.StatusText(status), status)
 				return
 			}
 			fmtSum := fmt.Sprintf("%s %x %s\n", algo, sum, path.Base(srv.file.name))
@@ -268,6 +300,7 @@ func (srv *server) checksums() http.HandlerFunc {
 			}
 			sum, err := srv.file.checksum(a)
 			if err != nil {
+				log.Println(err)
 				http.Error(w, http.StatusText(500), 500)
 				return
 			}
