@@ -42,14 +42,17 @@ var (
 	errTooManyFiles   = errors.New("too many files")
 	errEmptySum       = errors.New("empty checksum")
 
-	flagAddress = flag.String("a", defaultAddr, "server address:port")
-	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
-	flagKeep    = flag.Bool("k", false, "don't remove stored stdin file")
-	flagLog     = flag.Bool("log", false, "enable verbose logging")
-	flagTempDir = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
+	flagAddress  = flag.String("a", defaultAddr, "server address:port")
+	flagBufSize  = flag.Int("b", defaultBufSize, "buffer size in bytes")
+	flagFilename = flag.String("f", "", "custom filename for Content-Disposition header")
+	flagKeep     = flag.Bool("k", false, "don't remove stored stdin file")
+	flagLog      = flag.Bool("log", false, "enable verbose logging")
+	flagNoDisp   = flag.Bool("nd", false, "no disposition, don't send Content-Disposition header")
+	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 )
 
 type file struct {
+	path       string
 	name       string
 	buf        []byte
 	isBuffered bool
@@ -60,7 +63,6 @@ func main() {
 	flag.Parse()
 
 	// TODO check flags values before using them, add a checkFlags() func.
-	// TODO Content-Disposition filename and custom filename with -f flag.
 	// TODO Cache headers?
 	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
@@ -102,12 +104,15 @@ func run() error {
 	default:
 		return errTooManyFiles
 	}
+	if *flagFilename != "" {
+		f.name = path.Base(*flagFilename)
+	}
 
 	srv := http.Server{
 		Addr:    *flagAddress,
 		Handler: wrap(http.DefaultServeMux),
 	}
-	http.HandleFunc("/", sendFile(f))
+	http.HandleFunc("/", sendFile(f, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
 	http.HandleFunc("/checksums/", sendError(404))
 	http.HandleFunc("/checksums/md5", sendChecksum(f, md5.New))
@@ -143,7 +148,7 @@ func offerStdin(bufSize int, tempDir string) (file, error) {
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
 		name := fmt.Sprintf("%s-%d", progName, time.Now().Unix())
-		return file{name: name, buf: buf, isBuffered: true}, nil
+		return file{path: "-", name: name, buf: buf, isBuffered: true}, nil
 	}
 	if !errors.Is(err, errTooBig) {
 		return file{}, err
@@ -162,21 +167,21 @@ func offerStdin(bufSize int, tempDir string) (file, error) {
 		return file{}, err
 	}
 	log.Printf("saved stdin to %s", tmp.Name())
-	return file{name: tmp.Name(), isTemp: true}, nil
+	return file{path: tmp.Name(), name: path.Base(tmp.Name()), isTemp: true}, nil
 }
 
-func offerFile(fname string, bufSize int) (file, error) {
-	finfo, err := os.Stat(fname)
+func offerFile(fpath string, bufSize int) (file, error) {
+	finfo, err := os.Stat(fpath)
 	if err != nil {
 		return file{}, err
 	}
 	if finfo.IsDir() {
-		return file{}, fmt.Errorf("%s: %w", fname, errIsDir)
+		return file{}, fmt.Errorf("%s: %w", fpath, errIsDir)
 	}
 	if finfo.Size() > int64(bufSize) {
-		return file{name: fname}, nil
+		return file{path: fpath, name: path.Base(fpath)}, nil
 	}
-	fp, err := os.Open(fname)
+	fp, err := os.Open(fpath)
 	if err != nil {
 		return file{}, err
 	}
@@ -185,7 +190,7 @@ func offerFile(fname string, bufSize int) (file, error) {
 	if err != nil {
 		return file{}, err
 	}
-	return file{name: fname, buf: buf, isBuffered: true}, nil
+	return file{path: fpath, name: path.Base(fpath), buf: buf, isBuffered: true}, nil
 }
 
 func tryReadAll(r io.Reader, bufSize int) ([]byte, error) {
@@ -216,7 +221,7 @@ func (f file) reader() (io.Reader, error) {
 	if f.isBuffered {
 		return bytes.NewReader(f.buf), nil
 	}
-	fp, err := os.Open(f.name)
+	fp, err := os.Open(f.path)
 	if err != nil {
 		return nil, err
 	}
@@ -233,12 +238,15 @@ func wrap(h http.Handler) http.Handler {
 	})
 }
 
-func sendFile(f file) http.HandlerFunc {
+func sendFile(f file, disp bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rd, err := f.reader()
 		if err != nil {
 			httpSendError(w, err, 500)
 			return
+		}
+		if disp {
+			w.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=%q", f.name))
 		}
 		httpCopy(w, rd)
 	}
@@ -259,7 +267,7 @@ func sendChecksum(f file, hashNew func() hash.Hash) http.HandlerFunc {
 				log.Println(err)
 				return
 			}
-			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), path.Base(f.name))
+			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), f.name)
 		})
 		if sum == "" {
 			httpSendError(w, fmt.Errorf("sendChecksum: %w", errEmptySum), 500)
