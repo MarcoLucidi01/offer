@@ -59,7 +59,8 @@ var (
 
 type server struct {
 	http.Server
-	file offeredFile
+	file      offeredFile
+	sumsCache sync.Map
 }
 
 type offeredFile struct {
@@ -121,8 +122,9 @@ func run() error {
 	srv := &server{file: of}
 	srv.Addr = *flagAddress
 	srv.Handler = srv.wrap(http.DefaultServeMux)
-	http.Handle("/", srv.offerFile())
-	http.Handle("/checksums/", http.StripPrefix("/checksums/", srv.checksums()))
+	http.HandleFunc("/", srv.offerFile)
+	http.HandleFunc("/checksums", srv.allChecksums)
+	http.Handle("/checksums/", http.StripPrefix("/checksums/", http.HandlerFunc(srv.singleChecksum)))
 
 	waitConns := make(chan struct{})
 	go func() {
@@ -250,66 +252,73 @@ func (srv *server) wrap(h http.Handler) http.Handler {
 	})
 }
 
-func (srv *server) offerFile() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if n, err := srv.file.copyTo(w); err != nil {
-			log.Println(err)
-			if n == 0 {
-				http.Error(w, http.StatusText(404), 404)
-			}
+func (srv *server) offerFile(w http.ResponseWriter, r *http.Request) {
+	if n, err := srv.file.copyTo(w); err != nil {
+		log.Println(err)
+		if n == 0 {
+			http.Error(w, http.StatusText(404), 404)
 		}
 	}
 }
 
-func (srv *server) checksums() http.HandlerFunc {
-	var cache sync.Map
-	return func(w http.ResponseWriter, r *http.Request) {
-		algo := strings.ToLower(r.URL.Path)
-
-		if cachedSum, ok := cache.Load(algo); ok {
-			io.Copy(w, strings.NewReader(cachedSum.(string)))
-			return
-		}
-
-		if algo != "" {
-			sum, err := srv.file.checksum(algo)
-			if err != nil {
-				log.Println(err)
-				status := 500
-				if errors.Is(err, errUnknownAlgo) {
-					status = 404
-				}
-				http.Error(w, http.StatusText(status), status)
-				return
-			}
-			fmtSum := fmt.Sprintf("%s %x %s\n", algo, sum, path.Base(srv.file.name))
-			cache.Store(algo, fmtSum)
-			io.Copy(w, strings.NewReader(fmtSum))
-			return
-		}
-
-		var algos []string
-		for a, _ := range hashes {
-			algos = append(algos, a)
-		}
-		sort.Strings(algos)
-		var fmtSums strings.Builder
-		for _, a := range algos {
-			if cachedSum, ok := cache.Load(a); ok {
-				fmtSums.WriteString(cachedSum.(string))
-				continue
-			}
-			sum, err := srv.file.checksum(a)
-			if err != nil {
-				log.Println(err)
-				http.Error(w, http.StatusText(500), 500)
-				return
-			}
-			fmtSum := fmt.Sprintf("%s %x %s\n", a, sum, path.Base(srv.file.name))
-			cache.Store(a, fmtSum)
-			fmtSums.WriteString(fmtSum)
-		}
-		cache.Store(algo, fmtSums.String())
-		io.Copy(w, strings.NewReader(fmtSums.String()))
+func (srv *server) singleChecksum(w http.ResponseWriter, r *http.Request) {
+	algo := strings.ToLower(r.URL.Path)
+	if algo == "" {
+		// requests with trailing slash in (i.e. /checksums/) get routed
+		// here, but that means all checksums.
+		srv.allChecksums(w, r)
+		return
 	}
+	if cachedSum, ok := srv.sumsCache.Load(algo); ok {
+		io.Copy(w, strings.NewReader(cachedSum.(string)))
+		return
+	}
+	sum, err := srv.file.checksum(algo)
+	if err != nil {
+		log.Println(err)
+		status := 500
+		if errors.Is(err, errUnknownAlgo) {
+			status = 404
+		}
+		http.Error(w, http.StatusText(status), status)
+		return
+	}
+	formattedSum := formatSum(sum, algo, srv.file.name)
+	srv.sumsCache.Store(algo, formattedSum)
+	io.Copy(w, strings.NewReader(formattedSum))
+}
+
+func formatSum(sum []byte, algo, fpath string) string {
+	// TODO use same format of coreutils?
+	return fmt.Sprintf("%s %x %s\n", algo, sum, path.Base(fpath))
+}
+
+func (srv *server) allChecksums(w http.ResponseWriter, r *http.Request) {
+	if cachedSum, ok := srv.sumsCache.Load(""); ok {
+		io.Copy(w, strings.NewReader(cachedSum.(string)))
+		return
+	}
+	var algos []string
+	for algo, _ := range hashes {
+		algos = append(algos, algo)
+	}
+	sort.Strings(algos)
+	var formattedSums strings.Builder
+	for _, algo := range algos {
+		if cachedSum, ok := srv.sumsCache.Load(algo); ok {
+			formattedSums.WriteString(cachedSum.(string))
+			continue
+		}
+		sum, err := srv.file.checksum(algo)
+		if err != nil {
+			log.Println(err)
+			http.Error(w, http.StatusText(500), 500)
+			return
+		}
+		formattedSum := formatSum(sum, algo, srv.file.name)
+		srv.sumsCache.Store(algo, formattedSum)
+		formattedSums.WriteString(formattedSum)
+	}
+	srv.sumsCache.Store("", formattedSums.String())
+	io.Copy(w, strings.NewReader(formattedSums.String()))
 }
