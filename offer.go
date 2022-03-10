@@ -19,7 +19,6 @@ import (
 	"os"
 	"os/signal"
 	"path"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -31,7 +30,7 @@ const (
 	progRepo = "https://github.com/MarcoLucidi01/offer"
 
 	defaultAddr    = ":8080"
-	defaultBufSize = 20 * (1 << 20) // MiB
+	defaultBufSize = 50 * (1 << 20) // MiB
 )
 
 var (
@@ -41,14 +40,7 @@ var (
 	errIsDir          = errors.New("is a directory")
 	errTooBig         = errors.New("too big")
 	errTooManyFiles   = errors.New("too many files")
-	errUnknownAlgo    = errors.New("unknown hash algorithm")
-
-	hashes = map[string]func() hash.Hash{
-		"md5":    md5.New,
-		"sha1":   sha1.New,
-		"sha256": sha256.New,
-		"sha512": sha512.New,
-	}
+	errEmptySum       = errors.New("empty checksum")
 
 	flagAddress = flag.String("a", defaultAddr, "server address:port")
 	flagBufSize = flag.Int("b", defaultBufSize, "buffer size in bytes")
@@ -57,16 +49,11 @@ var (
 	flagTempDir = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 )
 
-type server struct {
-	http.Server
-	file      offeredFile
-	sumsCache sync.Map
-}
-
-type offeredFile struct {
-	name   string
-	isTemp bool
-	buf    []byte
+type file struct {
+	name       string
+	buf        []byte
+	isBuffered bool
+	isTemp     bool
 }
 
 func main() {
@@ -75,7 +62,6 @@ func main() {
 	// TODO check flags values before using them, add a checkFlags() func.
 	// TODO Content-Disposition filename and custom filename with -f flag.
 	// TODO Cache headers?
-	// TODO disable file buffering with -b 0 ?
 	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
 	// TODO basic authentication with -u flag?
@@ -98,33 +84,36 @@ func main() {
 }
 
 func run() error {
-	if *flagBufSize <= 0 {
+	if *flagBufSize < 0 {
 		return fmt.Errorf("%d: %w", *flagBufSize, errInvalidBufSize)
 	}
 
-	var of offeredFile
+	var f file
 	var err error
 	switch {
-	case len(flag.Args()) == 0:
-		fallthrough
-	case len(flag.Args()) == 1 && flag.Args()[0] == "-":
-		if of, err = offerStdin(*flagBufSize, *flagTempDir); err != nil {
+	case len(flag.Args()) == 0 || (len(flag.Args()) == 1 && flag.Args()[0] == "-"):
+		if f, err = offerStdin(*flagBufSize, *flagTempDir); err != nil {
 			return err
 		}
 	case len(flag.Args()) == 1:
-		if of, err = offerFile(flag.Args()[0], *flagBufSize); err != nil {
+		if f, err = offerFile(flag.Args()[0], *flagBufSize); err != nil {
 			return err
 		}
 	default:
 		return errTooManyFiles
 	}
 
-	srv := &server{file: of}
-	srv.Addr = *flagAddress
-	srv.Handler = srv.wrap(http.DefaultServeMux)
-	http.HandleFunc("/", srv.offerFile)
-	http.HandleFunc("/checksums", srv.allChecksums)
-	http.Handle("/checksums/", http.StripPrefix("/checksums/", http.HandlerFunc(srv.singleChecksum)))
+	srv := http.Server{
+		Addr:    *flagAddress,
+		Handler: wrap(http.DefaultServeMux),
+	}
+	http.HandleFunc("/", sendFile(f))
+	http.HandleFunc("/checksums", sendError(404))
+	http.HandleFunc("/checksums/", sendError(404))
+	http.HandleFunc("/checksums/md5", sendChecksum(f, md5.New))
+	http.HandleFunc("/checksums/sha1", sendChecksum(f, sha1.New))
+	http.HandleFunc("/checksums/sha256", sendChecksum(f, sha256.New))
+	http.HandleFunc("/checksums/sha512", sendChecksum(f, sha512.New))
 
 	waitConns := make(chan struct{})
 	go func() {
@@ -143,25 +132,25 @@ func run() error {
 	log.Println("waiting for active connections")
 	<-waitConns
 
-	if of.isTemp && !*flagKeep {
-		log.Printf("removing %s", of.name)
-		return os.Remove(of.name)
+	if f.isTemp && !*flagKeep {
+		log.Printf("removing %s", f.name)
+		return os.Remove(f.name)
 	}
 	return nil
 }
 
-func offerStdin(bufSize int, tempDir string) (offeredFile, error) {
+func offerStdin(bufSize int, tempDir string) (file, error) {
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
 		name := fmt.Sprintf("%s-%d", progName, time.Now().Unix())
-		return offeredFile{name: name, buf: buf}, nil
+		return file{name: name, buf: buf, isBuffered: true}, nil
 	}
 	if !errors.Is(err, errTooBig) {
-		return offeredFile{}, fmt.Errorf("tryReadAll: %w", err)
+		return file{}, err
 	}
 	tmp, err := os.CreateTemp(tempDir, fmt.Sprintf("%s-*", progName))
 	if err != nil {
-		return offeredFile{}, err
+		return file{}, err
 	}
 	defer tmp.Close()
 	_, err = io.Copy(tmp, bytes.NewReader(buf))
@@ -170,79 +159,71 @@ func offerStdin(bufSize int, tempDir string) (offeredFile, error) {
 	}
 	if err != nil {
 		os.Remove(tmp.Name())
-		return offeredFile{}, err
+		return file{}, err
 	}
 	log.Printf("saved stdin to %s", tmp.Name())
-	return offeredFile{name: tmp.Name(), isTemp: true}, nil
+	return file{name: tmp.Name(), isTemp: true}, nil
 }
 
-func offerFile(fname string, bufSize int) (offeredFile, error) {
+func offerFile(fname string, bufSize int) (file, error) {
 	finfo, err := os.Stat(fname)
 	if err != nil {
-		return offeredFile{}, err
+		return file{}, err
 	}
 	if finfo.IsDir() {
-		return offeredFile{}, fmt.Errorf("%s: %w", fname, errIsDir)
+		return file{}, fmt.Errorf("%s: %w", fname, errIsDir)
 	}
 	if finfo.Size() > int64(bufSize) {
-		return offeredFile{name: fname}, nil
+		return file{name: fname}, nil
 	}
-	f, err := os.Open(fname)
+	fp, err := os.Open(fname)
 	if err != nil {
-		return offeredFile{}, err
+		return file{}, err
 	}
-	defer f.Close()
-	buf, err := tryReadAll(f, bufSize)
+	defer fp.Close()
+	buf, err := tryReadAll(fp, bufSize)
 	if err != nil {
-		return offeredFile{}, err
+		return file{}, err
 	}
-	return offeredFile{name: fname, buf: buf}, nil
+	return file{name: fname, buf: buf, isBuffered: true}, nil
 }
 
 func tryReadAll(r io.Reader, bufSize int) ([]byte, error) {
 	buf := make([]byte, bufSize)
 	n, err := io.ReadFull(r, buf)
 	if err != nil {
-		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return buf[:n], nil
+		if errors.Is(err, io.ErrUnexpectedEOF) || (errors.Is(err, io.EOF) && n == 0) {
+			err = nil
 		}
 		return buf[:n], err
 	}
 	buf2 := make([]byte, 1)
-	if n2, err := r.Read(buf2); n2 > 0 || !errors.Is(err, io.EOF) {
-		if n2 > 0 {
-			buf = append(buf, buf2...)
-			n += n2
+	n2, err := r.Read(buf2)
+	if n2 > 0 {
+		buf = append(buf, buf2[:n2]...)
+		n += n2
+		if err == nil {
+			err = errTooBig
 		}
-		return buf[:n], errTooBig
 	}
-	return buf[:n], nil
+	if errors.Is(err, io.EOF) {
+		err = nil
+	}
+	return buf[:n], err
 }
 
-func (of offeredFile) copyTo(w io.Writer) (int64, error) {
-	if len(of.buf) > 0 {
-		return io.Copy(w, bytes.NewReader(of.buf))
+func (f file) reader() (io.Reader, error) {
+	if f.isBuffered {
+		return bytes.NewReader(f.buf), nil
 	}
-	f, err := os.Open(of.name)
+	fp, err := os.Open(f.name)
 	if err != nil {
-		return 0, err
-	}
-	return io.Copy(w, f)
-}
-
-func (of offeredFile) checksum(algo string) ([]byte, error) {
-	fn, ok := hashes[algo]
-	if !ok {
-		return nil, fmt.Errorf("%s: %w", algo, errUnknownAlgo)
-	}
-	h := fn()
-	if _, err := of.copyTo(h); err != nil {
 		return nil, err
 	}
-	return h.Sum(nil), nil
+	return fp, nil
 }
 
-func (srv *server) wrap(h http.Handler) http.Handler {
+func wrap(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
 
@@ -252,73 +233,58 @@ func (srv *server) wrap(h http.Handler) http.Handler {
 	})
 }
 
-func (srv *server) offerFile(w http.ResponseWriter, r *http.Request) {
-	if n, err := srv.file.copyTo(w); err != nil {
-		log.Println(err)
-		if n == 0 {
-			http.Error(w, http.StatusText(404), 404)
-		}
-	}
-}
-
-func (srv *server) singleChecksum(w http.ResponseWriter, r *http.Request) {
-	algo := strings.ToLower(r.URL.Path)
-	if algo == "" {
-		// requests with trailing slash in (i.e. /checksums/) get routed
-		// here, but that means all checksums.
-		srv.allChecksums(w, r)
-		return
-	}
-	if cachedSum, ok := srv.sumsCache.Load(algo); ok {
-		io.Copy(w, strings.NewReader(cachedSum.(string)))
-		return
-	}
-	sum, err := srv.file.checksum(algo)
-	if err != nil {
-		log.Println(err)
-		status := 500
-		if errors.Is(err, errUnknownAlgo) {
-			status = 404
-		}
-		http.Error(w, http.StatusText(status), status)
-		return
-	}
-	formattedSum := formatSum(sum, algo, srv.file.name)
-	srv.sumsCache.Store(algo, formattedSum)
-	io.Copy(w, strings.NewReader(formattedSum))
-}
-
-func formatSum(sum []byte, algo, fpath string) string {
-	// TODO use same format of coreutils?
-	return fmt.Sprintf("%s %x %s\n", algo, sum, path.Base(fpath))
-}
-
-func (srv *server) allChecksums(w http.ResponseWriter, r *http.Request) {
-	if cachedSum, ok := srv.sumsCache.Load(""); ok {
-		io.Copy(w, strings.NewReader(cachedSum.(string)))
-		return
-	}
-	var algos []string
-	for algo, _ := range hashes {
-		algos = append(algos, algo)
-	}
-	sort.Strings(algos)
-	var formattedSums strings.Builder
-	for _, algo := range algos {
-		if cachedSum, ok := srv.sumsCache.Load(algo); ok {
-			formattedSums.WriteString(cachedSum.(string))
-			continue
-		}
-		sum, err := srv.file.checksum(algo)
+func sendFile(f file) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rd, err := f.reader()
 		if err != nil {
-			log.Println(err)
-			http.Error(w, http.StatusText(500), 500)
+			httpSendError(w, err, 500)
 			return
 		}
-		formattedSum := formatSum(sum, algo, srv.file.name)
-		srv.sumsCache.Store(algo, formattedSum)
-		formattedSums.WriteString(formattedSum)
+		httpCopy(w, rd)
 	}
-	srv.sumsCache.Store("", formattedSums.String())
-	io.Copy(w, strings.NewReader(formattedSums.String()))
+}
+
+func sendChecksum(f file, hashNew func() hash.Hash) http.HandlerFunc {
+	var once sync.Once
+	var sum string
+	return func(w http.ResponseWriter, r *http.Request) {
+		once.Do(func() {
+			rd, err := f.reader()
+			if err != nil {
+				log.Println(err)
+				return
+			}
+			h := hashNew()
+			if _, err := io.Copy(h, rd); err != nil {
+				log.Println(err)
+				return
+			}
+			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), path.Base(f.name))
+		})
+		if sum == "" {
+			httpSendError(w, fmt.Errorf("sendChecksum: %w", errEmptySum), 500)
+			return
+		}
+		httpCopy(w, strings.NewReader(sum))
+	}
+}
+
+func sendError(code int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		httpSendError(w, nil, code)
+	}
+}
+
+func httpSendError(w http.ResponseWriter, err error, code int) {
+	if err != nil {
+		log.Println(err)
+	}
+	http.Error(w, fmt.Sprintf("%d %s", code, http.StatusText(code)), code)
+}
+
+func httpCopy(w http.ResponseWriter, rd io.Reader) {
+	if _, err := io.Copy(w, rd); err != nil {
+		log.Println(err)
+		// it's too late to send 500 or any other status.
+	}
 }
