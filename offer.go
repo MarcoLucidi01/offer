@@ -31,6 +31,7 @@ const (
 
 	defaultAddr    = ":8080"
 	defaultBufSize = 50 * (1 << 20) // MiB
+	defaultTimeout = 0
 )
 
 var (
@@ -49,6 +50,7 @@ var (
 	flagLog      = flag.Bool("log", false, "enable verbose logging")
 	flagNoDisp   = flag.Bool("nd", false, "no disposition, don't send Content-Disposition header")
 	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
+	flagTimeout  = flag.Duration("t", defaultTimeout, "timeout for automatic server shutdown")
 )
 
 type file struct {
@@ -63,8 +65,6 @@ func main() {
 	flag.Parse()
 
 	// TODO check flags values before using them, add a checkFlags() func.
-	// TODO Cache headers?
-	// TODO add a timeout for server shutdown and a -t flag to change it?
 	// TODO or a -n flag for allowing just n requests?
 	// TODO basic authentication with -u flag?
 	// TODO add stream mode for stdin? i.e. don't stash stdin in a tmp file,
@@ -72,6 +72,8 @@ func main() {
 	//      to write big files on disk if it's only needed once.
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
+	// TODO log also response status.
+	// TODO log server address and port.
 
 	if !*flagLog {
 		log.SetOutput(io.Discard)
@@ -122,10 +124,21 @@ func run() error {
 
 	waitConns := make(chan struct{})
 	go func() {
+		timer := time.NewTimer(*flagTimeout)
+		if *flagTimeout == 0 && !timer.Stop() {
+			<-timer.C // 0 means no timeout, drain the channel.
+		}
+
 		sigch := make(chan os.Signal, 1)
 		signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
-		sig := <-sigch
-		log.Printf("got signal %q shutting down", sig)
+
+		select {
+		case sig := <-sigch:
+			log.Printf("got signal %q, shutting down", sig)
+		case <-timer.C:
+			log.Println("timeout expired, shutting down")
+		}
+
 		if err := srv.Shutdown(context.Background()); err != nil {
 			log.Println(err)
 		}
