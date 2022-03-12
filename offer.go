@@ -31,11 +31,12 @@ const (
 
 	defaultAddr    = ":8080"
 	defaultBufSize = 50 * (1 << 20) // MiB
-	defaultTimeout = 0
+	defaultTimeout = 0              // 0 means no timeout.
+	defaultNReqs   = 0              // 0 means unlimited requests.
 )
 
 var (
-	progVersion = "vX.Y.Z-dev" // set with -ldflags at build time
+	progVersion = "vX.Y.Z-dev" // set with -ldflags at build time.
 
 	errInvalidBufSize = errors.New("invalid buffer size")
 	errIsDir          = errors.New("is a directory")
@@ -48,6 +49,7 @@ var (
 	flagFilename = flag.String("f", "", "custom filename for Content-Disposition header")
 	flagKeep     = flag.Bool("k", false, "don't remove stored stdin file")
 	flagLog      = flag.Bool("log", false, "enable verbose logging")
+	flagNReqs    = flag.Uint("n", defaultNReqs, "shutdown server after n requests")
 	flagNoDisp   = flag.Bool("nd", false, "no disposition, don't send Content-Disposition header")
 	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 	flagTimeout  = flag.Duration("t", defaultTimeout, "timeout for automatic server shutdown")
@@ -65,7 +67,6 @@ func main() {
 	flag.Parse()
 
 	// TODO check flags values before using them, add a checkFlags() func.
-	// TODO or a -n flag for allowing just n requests?
 	// TODO basic authentication with -u flag?
 	// TODO add stream mode for stdin? i.e. don't stash stdin in a tmp file,
 	//      allow only one request and disable checksums. useful to avoid
@@ -73,7 +74,8 @@ func main() {
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
 	// TODO log also response status.
-	// TODO log server address and port.
+	// TODO log server address and port and other server info e.g. timeout,
+	//      max reqs etc..
 
 	if !*flagLog {
 		log.SetOutput(io.Discard)
@@ -110,9 +112,10 @@ func run() error {
 		f.name = path.Base(*flagFilename)
 	}
 
+	done := make(chan struct{})
 	srv := http.Server{
 		Addr:    *flagAddress,
-		Handler: wrap(http.DefaultServeMux),
+		Handler: maxReqs(*flagNReqs, done, wrap(http.DefaultServeMux)),
 	}
 	http.HandleFunc("/", sendFile(f, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
@@ -137,6 +140,8 @@ func run() error {
 			log.Printf("got signal %q, shutting down", sig)
 		case <-timer.C:
 			log.Println("timeout expired, shutting down")
+		case <-done:
+			log.Println("max number of requests received, shutting down")
 		}
 
 		if err := srv.Shutdown(context.Background()); err != nil {
@@ -241,6 +246,7 @@ func (f file) reader() (io.Reader, error) {
 	return fp, nil
 }
 
+// TODO split into multiple wrappers: logReqs() and commonHeaders().
 func wrap(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
@@ -248,6 +254,30 @@ func wrap(h http.Handler) http.Handler {
 		w.Header().Add("Server", fmt.Sprintf("%s %s", progName, progVersion))
 
 		h.ServeHTTP(w, r)
+	})
+}
+
+func maxReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
+	if n == 0 {
+		return h
+	}
+	var mu sync.Mutex
+	var once sync.Once
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if n == 0 {
+			mu.Unlock()
+			httpSendError(w, nil, 503)
+			return
+		}
+		n--
+		mu.Unlock()
+		h.ServeHTTP(w, r)
+		mu.Lock()
+		if n == 0 {
+			once.Do(func() { close(done) })
+		}
+		mu.Unlock()
 	})
 }
 
