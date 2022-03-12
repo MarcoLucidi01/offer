@@ -63,6 +63,11 @@ type file struct {
 	isTemp     bool
 }
 
+type statusRespWriter struct {
+	http.ResponseWriter
+	status int
+}
+
 func main() {
 	flag.Parse()
 
@@ -73,7 +78,6 @@ func main() {
 	//      to write big files on disk if it's only needed once.
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
-	// TODO log also response status.
 	// TODO log server address and port and other server info e.g. timeout,
 	//      max reqs etc..
 
@@ -246,11 +250,17 @@ func (f file) reader() (io.Reader, error) {
 	return fp, nil
 }
 
+func (w *statusRespWriter) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
 func logReqs(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
-		h.ServeHTTP(w, r)
-		// TODO log resp status
+		log.Printf("--> %s %s %s", r.RemoteAddr, r.Method, r.URL)
+		sw := &statusRespWriter{ResponseWriter: w, status: 200}
+		h.ServeHTTP(sw, r)
+		log.Printf("<-- %s %s %s %d %s", r.RemoteAddr, r.Method, r.URL, sw.status, http.StatusText(sw.status))
 	})
 }
 
