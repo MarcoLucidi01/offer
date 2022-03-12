@@ -115,7 +115,7 @@ func run() error {
 	done := make(chan struct{})
 	srv := http.Server{
 		Addr:    *flagAddress,
-		Handler: maxReqs(*flagNReqs, done, wrap(http.DefaultServeMux)),
+		Handler: logReqs(commonRespHeaders(limitNReqs(*flagNReqs, done, http.DefaultServeMux))),
 	}
 	http.HandleFunc("/", sendFile(f, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
@@ -246,19 +246,23 @@ func (f file) reader() (io.Reader, error) {
 	return fp, nil
 }
 
-// TODO split into multiple wrappers: logReqs() and commonHeaders().
-func wrap(h http.Handler) http.Handler {
+func logReqs(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("%s %s %s", r.RemoteAddr, r.Method, r.URL)
+		h.ServeHTTP(w, r)
+		// TODO log resp status
+	})
+}
 
+func commonRespHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Add("Server", fmt.Sprintf("%s %s", progName, progVersion))
-
 		h.ServeHTTP(w, r)
 	})
 }
 
-func maxReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
-	if n == 0 {
+func limitNReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
+	if n == 0 { // 0 means unlimited requests.
 		return h
 	}
 	var mu sync.Mutex
