@@ -38,14 +38,13 @@ const (
 var (
 	progVersion = "vX.Y.Z-dev" // set with -ldflags at build time.
 
-	errInvalidBufSize = errors.New("invalid buffer size")
-	errIsDir          = errors.New("is a directory")
-	errTooBig         = errors.New("too big")
-	errTooManyFiles   = errors.New("too many files")
-	errEmptySum       = errors.New("empty checksum")
+	errIsDir        = errors.New("is a directory")
+	errTooBig       = errors.New("too big")
+	errTooManyFiles = errors.New("too many files")
+	errEmptySum     = errors.New("empty checksum")
 
 	flagAddress  = flag.String("a", defaultAddr, "server address:port")
-	flagBufSize  = flag.Int("b", defaultBufSize, "buffer size in bytes")
+	flagBufSize  = flag.Uint("b", defaultBufSize, "buffer size in bytes")
 	flagFilename = flag.String("f", "", "custom filename for Content-Disposition header")
 	flagKeep     = flag.Bool("k", false, "don't remove stored stdin file")
 	flagLog      = flag.Bool("log", false, "enable verbose logging")
@@ -94,10 +93,6 @@ func main() {
 }
 
 func run() error {
-	if *flagBufSize < 0 {
-		return fmt.Errorf("%d: %w", *flagBufSize, errInvalidBufSize)
-	}
-
 	var f file
 	var err error
 	switch {
@@ -166,7 +161,7 @@ func run() error {
 	return nil
 }
 
-func offerStdin(bufSize int, tempDir string) (file, error) {
+func offerStdin(bufSize uint, tempDir string) (file, error) {
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
 		name := fmt.Sprintf("%s-%d", progName, time.Now().Unix())
@@ -192,7 +187,7 @@ func offerStdin(bufSize int, tempDir string) (file, error) {
 	return file{path: tmp.Name(), name: path.Base(tmp.Name()), isTemp: true}, nil
 }
 
-func offerFile(fpath string, bufSize int) (file, error) {
+func offerFile(fpath string, bufSize uint) (file, error) {
 	finfo, err := os.Stat(fpath)
 	if err != nil {
 		return file{}, err
@@ -200,7 +195,7 @@ func offerFile(fpath string, bufSize int) (file, error) {
 	if finfo.IsDir() {
 		return file{}, fmt.Errorf("%s: %w", fpath, errIsDir)
 	}
-	if finfo.Size() > int64(bufSize) {
+	if uint(finfo.Size()) > bufSize {
 		return file{path: fpath, name: path.Base(fpath)}, nil
 	}
 	fp, err := os.Open(fpath)
@@ -215,7 +210,7 @@ func offerFile(fpath string, bufSize int) (file, error) {
 	return file{path: fpath, name: path.Base(fpath), buf: buf, isBuffered: true}, nil
 }
 
-func tryReadAll(r io.Reader, bufSize int) ([]byte, error) {
+func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
 	buf := make([]byte, bufSize)
 	n, err := io.ReadFull(r, buf)
 	if err != nil {

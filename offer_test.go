@@ -9,7 +9,7 @@ import (
 func TestTryReadAll(t *testing.T) {
 	var tests = []struct {
 		input   string
-		bufSize int
+		bufSize uint
 		err     error
 	}{
 		{"", 0, nil},
@@ -43,7 +43,7 @@ func TestTryReadAll(t *testing.T) {
 		if err == nil && len(test.input) != len(buf) {
 			t.Fatalf("%d: len(input) != len(buf): %d != %d", i, len(test.input), len(buf))
 		}
-		if len(buf) > test.bufSize+1 {
+		if uint(len(buf)) > test.bufSize+1 {
 			t.Fatalf("%d: len(buf) > bufSize+1: %d > %d", i, len(buf), test.bufSize)
 		}
 		for j, b := range buf {
