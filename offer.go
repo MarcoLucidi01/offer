@@ -155,8 +155,8 @@ func run() error {
 	<-waitConns
 
 	if f.isTemp && !*flagKeep {
-		log.Printf("removing %s", f.name)
-		return os.Remove(f.name)
+		log.Printf("removing %s", f.path)
+		return os.Remove(f.path)
 	}
 	return nil
 }
