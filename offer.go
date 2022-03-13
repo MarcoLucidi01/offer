@@ -50,16 +50,20 @@ var (
 	flagLog      = flag.Bool("log", false, "enable verbose logging")
 	flagNReqs    = flag.Uint("n", defaultNReqs, "shutdown server after n requests")
 	flagNoDisp   = flag.Bool("nd", false, "no disposition, don't send Content-Disposition header")
+	flagStream   = flag.Bool("s", false, "stream mode, don't store stdin in a file, allow only 1 request")
 	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 	flagTimeout  = flag.Duration("t", defaultTimeout, "timeout for automatic server shutdown")
 )
 
+// TODO rename to payload?
 type file struct {
 	path       string
 	name       string
 	buf        []byte
+	stream     io.Reader
 	isBuffered bool
 	isTemp     bool
+	isStream   bool
 }
 
 type statusRespWriter struct {
@@ -72,13 +76,8 @@ func main() {
 
 	// TODO check flags values before using them, add a checkFlags() func.
 	// TODO basic authentication with -u flag?
-	// TODO add stream mode for stdin? i.e. don't stash stdin in a tmp file,
-	//      allow only one request and disable checksums. useful to avoid
-	//      to write big files on disk if it's only needed once.
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
-	// TODO log server address and port and other server info e.g. timeout,
-	//      max reqs etc..
 
 	if !*flagLog {
 		log.SetOutput(io.Discard)
@@ -97,7 +96,7 @@ func run() error {
 	var err error
 	switch {
 	case len(flag.Args()) == 0 || (len(flag.Args()) == 1 && flag.Args()[0] == "-"):
-		if f, err = offerStdin(*flagBufSize, *flagTempDir); err != nil {
+		if f, err = offerStdin(*flagBufSize, *flagTempDir, *flagStream); err != nil {
 			return err
 		}
 	case len(flag.Args()) == 1:
@@ -109,6 +108,9 @@ func run() error {
 	}
 	if *flagFilename != "" {
 		f.name = path.Base(*flagFilename)
+	}
+	if f.isStream {
+		*flagNReqs = 1
 	}
 
 	done := make(chan struct{})
@@ -140,7 +142,7 @@ func run() error {
 		case <-timer.C:
 			log.Println("timeout expired, shutting down")
 		case <-done:
-			log.Println("max number of requests received, shutting down")
+			log.Println("max number of requests fulfilled, shutting down")
 		}
 
 		if err := srv.Shutdown(context.Background()); err != nil {
@@ -161,11 +163,17 @@ func run() error {
 	return nil
 }
 
-func offerStdin(bufSize uint, tempDir string) (file, error) {
+func defaultStdinName() string {
+	return fmt.Sprintf("%s-%d", progName, time.Now().Unix())
+}
+
+func offerStdin(bufSize uint, tempDir string, stream bool) (file, error) {
+	if stream {
+		return file{path: "-", name: defaultStdinName(), stream: os.Stdin, isStream: true}, nil
+	}
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
-		name := fmt.Sprintf("%s-%d", progName, time.Now().Unix())
-		return file{path: "-", name: name, buf: buf, isBuffered: true}, nil
+		return file{path: "-", name: defaultStdinName(), buf: buf, isBuffered: true}, nil
 	}
 	if !errors.Is(err, errTooBig) {
 		return file{}, err
@@ -235,6 +243,9 @@ func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
 }
 
 func (f file) reader() (io.Reader, error) {
+	if f.isStream {
+		return f.stream, nil
+	}
 	if f.isBuffered {
 		return bytes.NewReader(f.buf), nil
 	}
