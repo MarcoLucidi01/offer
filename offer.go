@@ -38,10 +38,11 @@ const (
 var (
 	progVersion = "vX.Y.Z-dev" // set with -ldflags at build time.
 
-	errIsDir        = errors.New("is a directory")
-	errTooBig       = errors.New("too big")
-	errTooManyFiles = errors.New("too many files")
-	errEmptySum     = errors.New("empty checksum")
+	errIsDir           = errors.New("is a directory")
+	errTooBig          = errors.New("too big")
+	errTooManyFiles    = errors.New("too many files")
+	errEmptySum        = errors.New("empty checksum")
+	errInvalidUserPass = errors.New("invalid user:password")
 
 	flagAddress  = flag.String("a", defaultAddr, "server address:port")
 	flagBufSize  = flag.Uint("b", defaultBufSize, "buffer size in bytes")
@@ -53,6 +54,7 @@ var (
 	flagStream   = flag.Bool("s", false, "stream mode, don't store stdin in a file, allow only 1 request")
 	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
 	flagTimeout  = flag.Duration("t", defaultTimeout, "timeout for automatic server shutdown")
+	flagUserPass = flag.String("u", "", "user:password for basic authentication")
 )
 
 // TODO rename to payload?
@@ -75,7 +77,6 @@ func main() {
 	flag.Parse()
 
 	// TODO check flags values before using them, add a checkFlags() func.
-	// TODO basic authentication with -u flag?
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
 	// TODO handle range requests? maybe would be better to use http.ServeContent()
 
@@ -92,8 +93,12 @@ func main() {
 }
 
 func run() error {
+	user, pass, err := parseUserPass(*flagUserPass)
+	if err != nil {
+		return err
+	}
+
 	var f file
-	var err error
 	switch {
 	case len(flag.Args()) == 0 || (len(flag.Args()) == 1 && flag.Args()[0] == "-"):
 		if f, err = offerStdin(*flagBufSize, *flagTempDir, *flagStream); err != nil {
@@ -116,7 +121,7 @@ func run() error {
 	done := make(chan struct{})
 	srv := http.Server{
 		Addr:    *flagAddress,
-		Handler: logReqs(commonRespHeaders(limitNReqs(*flagNReqs, done, http.DefaultServeMux))),
+		Handler: logReqs(commonRespHeaders(basicAuth(user, pass, limitNReqs(*flagNReqs, done, http.DefaultServeMux)))),
 	}
 	http.HandleFunc("/", sendFile(f, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
@@ -163,8 +168,15 @@ func run() error {
 	return nil
 }
 
-func defaultStdinName() string {
-	return fmt.Sprintf("%s-%d", progName, time.Now().Unix())
+func parseUserPass(s string) (string, string, error) {
+	if s == "" {
+		return "", "", nil
+	}
+	cred := strings.SplitN(s, ":", 2)
+	if len(cred) != 2 || cred[0] == "" || cred[1] == "" {
+		return "", "", errInvalidUserPass
+	}
+	return cred[0], cred[1], nil
 }
 
 func offerStdin(bufSize uint, tempDir string, stream bool) (file, error) {
@@ -193,6 +205,10 @@ func offerStdin(bufSize uint, tempDir string, stream bool) (file, error) {
 	}
 	log.Printf("saved stdin to %s", tmp.Name())
 	return file{path: tmp.Name(), name: path.Base(tmp.Name()), isTemp: true}, nil
+}
+
+func defaultStdinName() string {
+	return fmt.Sprintf("%s-%d", progName, time.Now().Unix())
 }
 
 func offerFile(fpath string, bufSize uint) (file, error) {
@@ -277,6 +293,7 @@ func commonRespHeaders(h http.Handler) http.Handler {
 	})
 }
 
+// TODO count only successful (200 OK) responses?
 func limitNReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
 	if n == 0 { // 0 means unlimited requests.
 		return h
@@ -298,6 +315,21 @@ func limitNReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
 			once.Do(func() { close(done) })
 		}
 		mu.Unlock()
+	})
+}
+
+func basicAuth(user, pass string, h http.Handler) http.Handler {
+	if user == "" || pass == "" { // empty user or pass means no auth.
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, p, ok := r.BasicAuth()
+		if ok && u == user && p == pass {
+			h.ServeHTTP(w, r)
+			return
+		}
+		w.Header().Add("WWW-Authenticate", fmt.Sprintf(`Basic realm=%q, charset="utf-8"`, progName))
+		httpSendError(w, nil, 401)
 	})
 }
 

@@ -53,3 +53,36 @@ func TestTryReadAll(t *testing.T) {
 		}
 	}
 }
+
+func TestParseUserPass(t *testing.T) {
+	var tests = []struct {
+		s    string
+		user string
+		pass string
+		err  error
+	}{
+		{"", "", "", nil},
+		{":", "", "", errInvalidUserPass},
+		{"foo", "", "", errInvalidUserPass},
+		{"foo:", "", "", errInvalidUserPass},
+		{":foo", "", "", errInvalidUserPass},
+		{"f:b", "f", "b", nil},
+		{"foo:bar", "foo", "bar", nil},
+		{"foo:bar:baz", "foo", "bar:baz", nil},
+		{"user with spaces:password", "user with spaces", "password", nil},
+		{"Aladdin:open sesame", "Aladdin", "open sesame", nil},
+	}
+
+	for i, test := range tests {
+		user, pass, err := parseUserPass(test.s)
+		if !errors.Is(err, test.err) {
+			t.Fatalf(`%d: %q: expecting "%v" error but got "%v"`, i, test.s, test.err, err)
+		}
+		if user != test.user {
+			t.Fatalf("%d: %q: expecting user %q but got %q", i, test.s, test.user, user)
+		}
+		if pass != test.pass {
+			t.Fatalf("%d: %q: expecting password %q but got %q", i, test.s, test.pass, pass)
+		}
+	}
+}
