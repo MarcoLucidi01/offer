@@ -78,7 +78,6 @@ func main() {
 
 	// TODO check flags values before using them, add a checkFlags() func.
 	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
-	// TODO handle range requests? maybe would be better to use http.ServeContent()
 
 	if !*flagLog {
 		log.SetOutput(io.Discard)
@@ -343,7 +342,15 @@ func sendFile(f file, disp bool) http.HandlerFunc {
 		if disp {
 			w.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=%q", f.name))
 		}
-		httpCopy(w, rd)
+		if f.isStream {
+			// in stream mode we can't seek the reader to get
+			// content size or serve ranges like http.ServeContent() does.
+			// NOTE: *os.File is a io.ReadSeeker but os.Stdin won't seek.
+			httpCopy(w, rd)
+			return
+		}
+		// TODO use proper modtime?
+		http.ServeContent(w, r, f.name, time.Time{}, rd.(io.ReadSeeker))
 	}
 }
 
