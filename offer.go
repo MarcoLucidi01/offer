@@ -57,10 +57,9 @@ var (
 	flagUserPass = flag.String("u", "", "user:password for basic authentication")
 )
 
-// TODO rename to payload?
-type file struct {
-	path       string
-	name       string
+type payload struct {
+	fpath      string
+	fname      string
 	buf        []byte
 	stream     io.Reader
 	isBuffered bool
@@ -97,23 +96,23 @@ func run() error {
 		return err
 	}
 
-	var f file
+	var p payload
 	switch {
 	case len(flag.Args()) == 0 || (len(flag.Args()) == 1 && flag.Args()[0] == "-"):
-		if f, err = offerStdin(*flagBufSize, *flagTempDir, *flagStream); err != nil {
+		if p, err = offerStdin(*flagBufSize, *flagTempDir, *flagStream); err != nil {
 			return err
 		}
 	case len(flag.Args()) == 1:
-		if f, err = offerFile(flag.Args()[0], *flagBufSize); err != nil {
+		if p, err = offerFile(flag.Args()[0], *flagBufSize); err != nil {
 			return err
 		}
 	default:
 		return errTooManyFiles
 	}
 	if *flagFilename != "" {
-		f.name = path.Base(*flagFilename)
+		p.fname = path.Base(*flagFilename)
 	}
-	if f.isStream {
+	if p.isStream {
 		*flagNReqs = 1
 	}
 
@@ -122,13 +121,13 @@ func run() error {
 		Addr:    *flagAddress,
 		Handler: logReqs(commonRespHeaders(basicAuth(user, pass, limitNReqs(*flagNReqs, done, http.DefaultServeMux)))),
 	}
-	http.HandleFunc("/", sendFile(f, !*flagNoDisp))
+	http.HandleFunc("/", sendFile(p, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
 	http.HandleFunc("/checksums/", sendError(404))
-	http.HandleFunc("/checksums/md5", sendChecksum(f, md5.New))
-	http.HandleFunc("/checksums/sha1", sendChecksum(f, sha1.New))
-	http.HandleFunc("/checksums/sha256", sendChecksum(f, sha256.New))
-	http.HandleFunc("/checksums/sha512", sendChecksum(f, sha512.New))
+	http.HandleFunc("/checksums/md5", sendChecksum(p, md5.New))
+	http.HandleFunc("/checksums/sha1", sendChecksum(p, sha1.New))
+	http.HandleFunc("/checksums/sha256", sendChecksum(p, sha256.New))
+	http.HandleFunc("/checksums/sha512", sendChecksum(p, sha512.New))
 
 	waitConns := make(chan struct{})
 	go func() {
@@ -160,9 +159,9 @@ func run() error {
 	log.Println("waiting for active connections")
 	<-waitConns
 
-	if f.isTemp && !*flagKeep {
-		log.Printf("removing %s", f.path)
-		return os.Remove(f.path)
+	if p.isTemp && !*flagKeep {
+		log.Printf("removing %s", p.fpath)
+		return os.Remove(p.fpath)
 	}
 	return nil
 }
@@ -178,20 +177,20 @@ func parseUserPass(s string) (string, string, error) {
 	return cred[0], cred[1], nil
 }
 
-func offerStdin(bufSize uint, tempDir string, stream bool) (file, error) {
+func offerStdin(bufSize uint, tempDir string, stream bool) (payload, error) {
 	if stream {
-		return file{path: "-", name: defaultStdinName(), stream: os.Stdin, isStream: true}, nil
+		return payload{fpath: "-", fname: defaultStdinName(), stream: os.Stdin, isStream: true}, nil
 	}
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
-		return file{path: "-", name: defaultStdinName(), buf: buf, isBuffered: true}, nil
+		return payload{fpath: "-", fname: defaultStdinName(), buf: buf, isBuffered: true}, nil
 	}
 	if !errors.Is(err, errTooBig) {
-		return file{}, err
+		return payload{}, err
 	}
 	tmp, err := os.CreateTemp(tempDir, fmt.Sprintf("%s-*", progName))
 	if err != nil {
-		return file{}, err
+		return payload{}, err
 	}
 	defer tmp.Close()
 	_, err = io.Copy(tmp, bytes.NewReader(buf))
@@ -200,37 +199,37 @@ func offerStdin(bufSize uint, tempDir string, stream bool) (file, error) {
 	}
 	if err != nil {
 		os.Remove(tmp.Name())
-		return file{}, err
+		return payload{}, err
 	}
 	log.Printf("saved stdin to %s", tmp.Name())
-	return file{path: tmp.Name(), name: path.Base(tmp.Name()), isTemp: true}, nil
+	return payload{fpath: tmp.Name(), fname: path.Base(tmp.Name()), isTemp: true}, nil
 }
 
 func defaultStdinName() string {
 	return fmt.Sprintf("%s-%d", progName, time.Now().Unix())
 }
 
-func offerFile(fpath string, bufSize uint) (file, error) {
+func offerFile(fpath string, bufSize uint) (payload, error) {
 	finfo, err := os.Stat(fpath)
 	if err != nil {
-		return file{}, err
+		return payload{}, err
 	}
 	if finfo.IsDir() {
-		return file{}, fmt.Errorf("%s: %w", fpath, errIsDir)
+		return payload{}, fmt.Errorf("%s: %w", fpath, errIsDir)
 	}
 	if uint(finfo.Size()) > bufSize {
-		return file{path: fpath, name: path.Base(fpath)}, nil
+		return payload{fpath: fpath, fname: path.Base(fpath)}, nil
 	}
 	fp, err := os.Open(fpath)
 	if err != nil {
-		return file{}, err
+		return payload{}, err
 	}
 	defer fp.Close()
 	buf, err := tryReadAll(fp, bufSize)
 	if err != nil {
-		return file{}, err
+		return payload{}, err
 	}
-	return file{path: fpath, name: path.Base(fpath), buf: buf, isBuffered: true}, nil
+	return payload{fpath: fpath, fname: path.Base(fpath), buf: buf, isBuffered: true}, nil
 }
 
 func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
@@ -257,18 +256,18 @@ func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
 	return buf[:n], err
 }
 
-func (f file) reader() (io.Reader, error) {
-	if f.isStream {
-		return f.stream, nil
+func (p payload) reader() (io.Reader, error) {
+	if p.isStream {
+		return p.stream, nil
 	}
-	if f.isBuffered {
-		return bytes.NewReader(f.buf), nil
+	if p.isBuffered {
+		return bytes.NewReader(p.buf), nil
 	}
-	fp, err := os.Open(f.path)
+	f, err := os.Open(p.fpath)
 	if err != nil {
 		return nil, err
 	}
-	return fp, nil
+	return f, nil
 }
 
 func (w *statusRespWriter) WriteHeader(status int) {
@@ -332,17 +331,17 @@ func basicAuth(user, pass string, h http.Handler) http.Handler {
 	})
 }
 
-func sendFile(f file, disp bool) http.HandlerFunc {
+func sendFile(p payload, disp bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rd, err := f.reader()
+		rd, err := p.reader()
 		if err != nil {
 			httpSendError(w, err, 500)
 			return
 		}
 		if disp {
-			w.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=%q", f.name))
+			w.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=%q", p.fname))
 		}
-		if f.isStream {
+		if p.isStream {
 			// in stream mode we can't seek the reader to get
 			// content size or serve ranges like http.ServeContent() does.
 			// NOTE: *os.File is a io.ReadSeeker but os.Stdin won't seek.
@@ -350,16 +349,16 @@ func sendFile(f file, disp bool) http.HandlerFunc {
 			return
 		}
 		// TODO use proper modtime?
-		http.ServeContent(w, r, f.name, time.Time{}, rd.(io.ReadSeeker))
+		http.ServeContent(w, r, p.fname, time.Time{}, rd.(io.ReadSeeker))
 	}
 }
 
-func sendChecksum(f file, hashNew func() hash.Hash) http.HandlerFunc {
+func sendChecksum(p payload, hashNew func() hash.Hash) http.HandlerFunc {
 	var once sync.Once
 	var sum string
 	return func(w http.ResponseWriter, r *http.Request) {
 		once.Do(func() {
-			rd, err := f.reader()
+			rd, err := p.reader()
 			if err != nil {
 				log.Println(err)
 				return
@@ -369,7 +368,7 @@ func sendChecksum(f file, hashNew func() hash.Hash) http.HandlerFunc {
 				log.Println(err)
 				return
 			}
-			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), f.name)
+			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), p.fname)
 		})
 		if sum == "" {
 			httpSendError(w, fmt.Errorf("sendChecksum: %w", errEmptySum), 500)
