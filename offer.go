@@ -67,9 +67,10 @@ type payload struct {
 	isStream   bool
 }
 
-type statusRespWriter struct {
+type infoResponseWriter struct {
 	http.ResponseWriter
-	status int
+	status  int
+	written uint
 }
 
 func main() {
@@ -270,17 +271,25 @@ func (p payload) reader() (io.Reader, error) {
 	return f, nil
 }
 
-func (w *statusRespWriter) WriteHeader(status int) {
+func (w *infoResponseWriter) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *infoResponseWriter) Write(buf []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(buf)
+	if n > 0 {
+		w.written += uint(n)
+	}
+	return n, err
 }
 
 func logReqs(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		log.Printf("--> %s %s %s", r.RemoteAddr, r.Method, r.URL)
-		sw := &statusRespWriter{ResponseWriter: w, status: 200}
-		h.ServeHTTP(sw, r)
-		log.Printf("<-- %s %s %s %d %s", r.RemoteAddr, r.Method, r.URL, sw.status, http.StatusText(sw.status))
+		iw := &infoResponseWriter{ResponseWriter: w, status: 200}
+		h.ServeHTTP(iw, r)
+		log.Printf("<-- %s %s %s %d %s %d", r.RemoteAddr, r.Method, r.URL, iw.status, http.StatusText(iw.status), iw.written)
 	})
 }
 
