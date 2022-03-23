@@ -62,6 +62,7 @@ type payload struct {
 	fname      string
 	buf        []byte
 	stream     io.Reader
+	mtime      time.Time
 	isBuffered bool
 	isTemp     bool
 	isStream   bool
@@ -180,12 +181,14 @@ func parseUserPass(s string) (string, string, error) {
 }
 
 func offerStdin(bufSize uint, tempDir string, stream bool) (payload, error) {
+	now := time.Now()
+	name := fmt.Sprintf("%s-%d", progName, now.Unix())
 	if stream {
-		return payload{fpath: "-", fname: defaultStdinName(), stream: os.Stdin, isStream: true}, nil
+		return payload{fpath: "-", fname: name, mtime: now, stream: os.Stdin, isStream: true}, nil
 	}
 	buf, err := tryReadAll(os.Stdin, bufSize)
 	if err == nil {
-		return payload{fpath: "-", fname: defaultStdinName(), buf: buf, isBuffered: true}, nil
+		return payload{fpath: "-", fname: name, mtime: now, buf: buf, isBuffered: true}, nil
 	}
 	if !errors.Is(err, errTooBig) {
 		return payload{}, err
@@ -204,11 +207,7 @@ func offerStdin(bufSize uint, tempDir string, stream bool) (payload, error) {
 		return payload{}, err
 	}
 	log.Printf("saved stdin to %s", tmp.Name())
-	return payload{fpath: tmp.Name(), fname: path.Base(tmp.Name()), isTemp: true}, nil
-}
-
-func defaultStdinName() string {
-	return fmt.Sprintf("%s-%d", progName, time.Now().Unix())
+	return payload{fpath: tmp.Name(), fname: path.Base(tmp.Name()), mtime: now, isTemp: true}, nil
 }
 
 func offerFile(fpath string, bufSize uint) (payload, error) {
@@ -220,18 +219,18 @@ func offerFile(fpath string, bufSize uint) (payload, error) {
 		return payload{}, fmt.Errorf("%s: %w", fpath, errIsDir)
 	}
 	if uint(finfo.Size()) > bufSize {
-		return payload{fpath: fpath, fname: path.Base(fpath)}, nil
+		return payload{fpath: fpath, fname: path.Base(fpath), mtime: finfo.ModTime()}, nil
 	}
-	fp, err := os.Open(fpath)
+	f, err := os.Open(fpath)
 	if err != nil {
 		return payload{}, err
 	}
-	defer fp.Close()
-	buf, err := tryReadAll(fp, bufSize)
+	defer f.Close()
+	buf, err := tryReadAll(f, bufSize)
 	if err != nil {
 		return payload{}, err
 	}
-	return payload{fpath: fpath, fname: path.Base(fpath), buf: buf, isBuffered: true}, nil
+	return payload{fpath: fpath, fname: path.Base(fpath), mtime: finfo.ModTime(), buf: buf, isBuffered: true}, nil
 }
 
 func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
@@ -270,6 +269,17 @@ func (p payload) reader() (io.Reader, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+func (p payload) modTime() (time.Time, error) {
+	if p.isStream || p.isBuffered {
+		return p.mtime, nil
+	}
+	finfo, err := os.Stat(p.fpath)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return finfo.ModTime(), nil
 }
 
 func (w *infoResponseWriter) WriteHeader(status int) {
@@ -343,6 +353,10 @@ func basicAuth(h http.Handler, user, pass string) http.Handler {
 func sendFile(p payload, disp bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rd, err := p.reader()
+		var mtime time.Time
+		if err == nil {
+			mtime, err = p.modTime()
+		}
 		if err != nil {
 			httpSendError(w, err, 500)
 			return
@@ -357,8 +371,7 @@ func sendFile(p payload, disp bool) http.HandlerFunc {
 			httpCopy(w, rd)
 			return
 		}
-		// TODO use proper modtime?
-		http.ServeContent(w, r, p.fname, time.Time{}, rd.(io.ReadSeeker))
+		http.ServeContent(w, r, p.fname, mtime, rd.(io.ReadSeeker))
 	}
 }
 
