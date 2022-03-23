@@ -113,15 +113,17 @@ func run() error {
 	if *flagFilename != "" {
 		p.fname = path.Base(*flagFilename)
 	}
-	if p.isStream {
+	if *flagStream {
 		*flagNReqs = 1
 	}
 
-	done := make(chan struct{})
-	srv := http.Server{
-		Addr:    *flagAddress,
-		Handler: logReqs(commonRespHeaders(basicAuth(user, pass, limitNReqs(*flagNReqs, done, http.DefaultServeMux)))),
-	}
+	limitReached := make(chan struct{})
+	srv := http.Server{Addr: *flagAddress, Handler: http.DefaultServeMux}
+	srv.Handler = basicAuth(srv.Handler, user, pass)
+	srv.Handler = limitReqs(srv.Handler, *flagNReqs, limitReached)
+	srv.Handler = commonRespHeaders(srv.Handler)
+	srv.Handler = logReqs(srv.Handler)
+
 	http.HandleFunc("/", sendFile(p, !*flagNoDisp))
 	http.HandleFunc("/checksums", sendError(404))
 	http.HandleFunc("/checksums/", sendError(404))
@@ -130,25 +132,24 @@ func run() error {
 	http.HandleFunc("/checksums/sha256", sendChecksum(p, sha256.New))
 	http.HandleFunc("/checksums/sha512", sendChecksum(p, sha512.New))
 
+	timeout := time.NewTimer(*flagTimeout)
+	if *flagTimeout == 0 && !timeout.Stop() {
+		<-timeout.C // 0 means no timeout, drain the channel.
+	}
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+
 	waitConns := make(chan struct{})
 	go func() {
-		timer := time.NewTimer(*flagTimeout)
-		if *flagTimeout == 0 && !timer.Stop() {
-			<-timer.C // 0 means no timeout, drain the channel.
-		}
-
-		sigch := make(chan os.Signal, 1)
-		signal.Notify(sigch, os.Interrupt, syscall.SIGTERM)
-
 		select {
-		case sig := <-sigch:
+		case sig := <-sigCh:
 			log.Printf("got signal %q, shutting down", sig)
-		case <-timer.C:
+		case <-timeout.C:
 			log.Println("timeout expired, shutting down")
-		case <-done:
+		case <-limitReached:
 			log.Println("max number of requests fulfilled, shutting down")
 		}
-
 		if err := srv.Shutdown(context.Background()); err != nil {
 			log.Println(err)
 		}
@@ -300,8 +301,7 @@ func commonRespHeaders(h http.Handler) http.Handler {
 	})
 }
 
-// TODO count only successful (200 OK) responses?
-func limitNReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
+func limitReqs(h http.Handler, n uint, limitReached chan struct{}) http.Handler {
 	if n == 0 { // 0 means unlimited requests.
 		return h
 	}
@@ -319,13 +319,13 @@ func limitNReqs(n uint, done chan struct{}, h http.Handler) http.Handler {
 		h.ServeHTTP(w, r)
 		mu.Lock()
 		if n == 0 {
-			once.Do(func() { close(done) })
+			once.Do(func() { close(limitReached) })
 		}
 		mu.Unlock()
 	})
 }
 
-func basicAuth(user, pass string, h http.Handler) http.Handler {
+func basicAuth(h http.Handler, user, pass string) http.Handler {
 	if user == "" || pass == "" { // empty user or pass means no auth.
 		return h
 	}
