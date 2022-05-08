@@ -3,419 +3,161 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha1"
-	"crypto/sha256"
-	"crypto/sha512"
 	"errors"
 	"flag"
 	"fmt"
-	"hash"
 	"io"
-	"log"
 	"net/http"
 	"os"
-	"os/signal"
-	"path"
-	"strings"
+	"path/filepath"
 	"sync"
-	"syscall"
-	"time"
 )
-
-const (
-	progName = "offer"
-	progRepo = "https://github.com/MarcoLucidi01/offer"
-
-	defaultAddr    = ":8080"
-	defaultBufSize = 50 * (1 << 20) // MiB
-	defaultTimeout = 0              // 0 means no timeout.
-	defaultNReqs   = 0              // 0 means unlimited requests.
-)
-
-var (
-	progVersion = "vX.Y.Z-dev" // set with -ldflags at build time.
-
-	errIsDir           = errors.New("is a directory")
-	errTooBig          = errors.New("too big")
-	errTooManyFiles    = errors.New("too many files")
-	errEmptySum        = errors.New("empty checksum")
-	errInvalidUserPass = errors.New("invalid user:password")
-
-	flagAddress  = flag.String("a", defaultAddr, "server address:port")
-	flagBufSize  = flag.Uint("b", defaultBufSize, "buffer size in bytes")
-	flagFilename = flag.String("f", "", "custom filename for Content-Disposition header")
-	flagKeep     = flag.Bool("k", false, "don't remove stored stdin file")
-	flagLog      = flag.Bool("log", false, "enable verbose logging")
-	flagNReqs    = flag.Uint("n", defaultNReqs, "shutdown server after n requests")
-	flagNoDisp   = flag.Bool("nd", false, "no disposition, don't send Content-Disposition header")
-	flagStream   = flag.Bool("s", false, "stream mode, don't store stdin in a file, allow only 1 request")
-	flagTempDir  = flag.String("tempdir", os.TempDir(), "temporary directory for storing stdin in a file")
-	flagTimeout  = flag.Duration("t", defaultTimeout, "timeout for automatic server shutdown")
-	flagUserPass = flag.String("u", "", "user:password for basic authentication")
-)
-
-type payload struct {
-	fpath      string
-	fname      string
-	buf        []byte
-	stream     io.Reader
-	mtime      time.Time
-	isBuffered bool
-	isTemp     bool
-	isStream   bool
-}
-
-type infoResponseWriter struct {
-	http.ResponseWriter
-	status  int
-	written uint
-}
 
 func main() {
+	flagAddr := flag.String("a", ":8080", "server address:port")
+	flagFname := flag.String("f", "", "filename for content disposition header")
+	flagNReqs := flag.Uint("n", 1, "number of requests allowed")
+	flagReceive := flag.Bool("r", false, "receive mode")
 	flag.Parse()
 
-	// TODO check flags values before using them, add a checkFlags() func.
-	// TODO -r flag for receiving a file? i.e. receive an offer eheh.
-
-	if !*flagLog {
-		log.SetOutput(io.Discard)
+	if flag.NArg() > 1 {
+		die("too many files, use zip or tar to offer multiple files")
 	}
-	log.Printf("%s %s pid %d", progName, progVersion, os.Getpid())
-
-	if err := run(); err != nil {
-		log.Println(err)
-		fmt.Fprintf(os.Stderr, "%s: %s\n", progName, err)
-		os.Exit(1)
+	fpath := "-"
+	if flag.NArg() == 1 {
+		fpath = flag.Args()[0]
 	}
-}
-
-func run() error {
-	user, pass, err := parseUserPass(*flagUserPass)
-	if err != nil {
-		return err
+	if fpath == "-" && *flagNReqs > 1 {
+		die("can't offer stdin more than once")
+	}
+	if fpath != "-" && *flagFname == "@" {
+		*flagFname = fpath
+	}
+	if *flagFname != "" {
+		*flagFname = filepath.Base(*flagFname)
 	}
 
-	var p payload
-	switch {
-	case len(flag.Args()) == 0 || (len(flag.Args()) == 1 && flag.Args()[0] == "-"):
-		if p, err = offerStdin(*flagBufSize, *flagTempDir, *flagStream); err != nil {
-			return err
-		}
-	case len(flag.Args()) == 1:
-		if p, err = offerFile(flag.Args()[0], *flagBufSize); err != nil {
-			return err
-		}
-	default:
-		return errTooManyFiles
+	done := make(chan bool)
+	handler := limitReqs(*flagNReqs, done, offer(fpath, *flagFname))
+	if *flagReceive {
+		handler = limitReqs(1, done, receive(fpath))
 	}
-	if *flagFilename != "" {
-		p.fname = path.Base(*flagFilename)
-	}
-	if *flagStream {
-		*flagNReqs = 1
-	}
+	http.HandleFunc("/", handler)
 
-	limitReached := make(chan struct{})
-	srv := http.Server{Addr: *flagAddress, Handler: http.DefaultServeMux}
-	srv.Handler = basicAuth(srv.Handler, user, pass)
-	srv.Handler = limitReqs(srv.Handler, *flagNReqs, limitReached)
-	srv.Handler = commonRespHeaders(srv.Handler)
-	srv.Handler = logReqs(srv.Handler)
-
-	http.HandleFunc("/", sendFile(p, !*flagNoDisp))
-	http.HandleFunc("/checksums", sendError(404))
-	http.HandleFunc("/checksums/", sendError(404))
-	http.HandleFunc("/checksums/md5", sendChecksum(p, md5.New))
-	http.HandleFunc("/checksums/sha1", sendChecksum(p, sha1.New))
-	http.HandleFunc("/checksums/sha256", sendChecksum(p, sha256.New))
-	http.HandleFunc("/checksums/sha512", sendChecksum(p, sha512.New))
-
-	timeout := time.NewTimer(*flagTimeout)
-	if *flagTimeout == 0 && !timeout.Stop() {
-		<-timeout.C // 0 means no timeout, drain the channel.
-	}
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
-
-	waitConns := make(chan struct{})
+	srv := http.Server{Addr: *flagAddr}
 	go func() {
-		select {
-		case sig := <-sigCh:
-			log.Printf("got signal %q, shutting down", sig)
-		case <-timeout.C:
-			log.Println("timeout expired, shutting down")
-		case <-limitReached:
-			log.Println("max number of requests fulfilled, shutting down")
-		}
+		<-done
 		if err := srv.Shutdown(context.Background()); err != nil {
-			log.Println(err)
+			errmsg(err.Error())
 		}
-		close(waitConns)
+		done <- true
 	}()
-	if err := srv.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		die(err.Error())
 	}
-	log.Println("waiting for active connections")
-	<-waitConns
-
-	if p.isTemp && !*flagKeep {
-		log.Printf("removing %s", p.fpath)
-		return os.Remove(p.fpath)
-	}
-	return nil
+	<-done
 }
 
-func parseUserPass(s string) (string, string, error) {
-	if s == "" {
-		return "", "", nil
-	}
-	cred := strings.SplitN(s, ":", 2)
-	if len(cred) != 2 || cred[0] == "" || cred[1] == "" {
-		return "", "", errInvalidUserPass
-	}
-	return cred[0], cred[1], nil
+func die(reason string) {
+	errmsg(reason)
+	os.Exit(1)
 }
 
-func offerStdin(bufSize uint, tempDir string, stream bool) (payload, error) {
-	now := time.Now()
-	name := fmt.Sprintf("%s-%d", progName, now.Unix())
-	if stream {
-		return payload{fpath: "-", fname: name, mtime: now, stream: os.Stdin, isStream: true}, nil
-	}
-	buf, err := tryReadAll(os.Stdin, bufSize)
-	if err == nil {
-		return payload{fpath: "-", fname: name, mtime: now, buf: buf, isBuffered: true}, nil
-	}
-	if !errors.Is(err, errTooBig) {
-		return payload{}, err
-	}
-	tmp, err := os.CreateTemp(tempDir, fmt.Sprintf("%s-*", progName))
-	if err != nil {
-		return payload{}, err
-	}
-	defer tmp.Close()
-	_, err = io.Copy(tmp, bytes.NewReader(buf))
-	if err == nil {
-		_, err = io.Copy(tmp, os.Stdin)
-	}
-	if err != nil {
-		os.Remove(tmp.Name())
-		return payload{}, err
-	}
-	log.Printf("saved stdin to %s", tmp.Name())
-	return payload{fpath: tmp.Name(), fname: path.Base(tmp.Name()), mtime: now, isTemp: true}, nil
+func errmsg(msg ...interface{}) {
+	fmt.Fprint(os.Stderr, "error: ")
+	fmt.Fprintln(os.Stderr, msg...)
 }
 
-func offerFile(fpath string, bufSize uint) (payload, error) {
-	finfo, err := os.Stat(fpath)
-	if err != nil {
-		return payload{}, err
-	}
-	if finfo.IsDir() {
-		return payload{}, fmt.Errorf("%s: %w", fpath, errIsDir)
-	}
-	if uint(finfo.Size()) > bufSize {
-		return payload{fpath: fpath, fname: path.Base(fpath), mtime: finfo.ModTime()}, nil
-	}
-	f, err := os.Open(fpath)
-	if err != nil {
-		return payload{}, err
-	}
-	defer f.Close()
-	buf, err := tryReadAll(f, bufSize)
-	if err != nil {
-		return payload{}, err
-	}
-	return payload{fpath: fpath, fname: path.Base(fpath), mtime: finfo.ModTime(), buf: buf, isBuffered: true}, nil
-}
-
-func tryReadAll(r io.Reader, bufSize uint) ([]byte, error) {
-	buf := make([]byte, bufSize)
-	n, err := io.ReadFull(r, buf)
-	if err != nil {
-		if errors.Is(err, io.ErrUnexpectedEOF) || (errors.Is(err, io.EOF) && n == 0) {
-			err = nil
-		}
-		return buf[:n], err
-	}
-	buf2 := make([]byte, 1)
-	n2, err := r.Read(buf2)
-	if n2 > 0 {
-		buf = append(buf, buf2[:n2]...)
-		n += n2
-		if err == nil {
-			err = errTooBig
-		}
-	}
-	if errors.Is(err, io.EOF) {
-		err = nil
-	}
-	return buf[:n], err
-}
-
-func (p payload) reader() (io.Reader, error) {
-	if p.isStream {
-		return p.stream, nil
-	}
-	if p.isBuffered {
-		return bytes.NewReader(p.buf), nil
-	}
-	f, err := os.Open(p.fpath)
-	if err != nil {
-		return nil, err
-	}
-	return f, nil
-}
-
-func (p payload) modTime() (time.Time, error) {
-	if p.isStream || p.isBuffered {
-		return p.mtime, nil
-	}
-	finfo, err := os.Stat(p.fpath)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return finfo.ModTime(), nil
-}
-
-func (w *infoResponseWriter) WriteHeader(status int) {
-	w.status = status
-	w.ResponseWriter.WriteHeader(status)
-}
-
-func (w *infoResponseWriter) Write(buf []byte) (int, error) {
-	n, err := w.ResponseWriter.Write(buf)
-	if n > 0 {
-		w.written += uint(n)
-	}
-	return n, err
-}
-
-func logReqs(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("--> %s %s %s", r.RemoteAddr, r.Method, r.URL)
-		iw := &infoResponseWriter{ResponseWriter: w, status: 200}
-		h.ServeHTTP(iw, r)
-		log.Printf("<-- %s %s %s %d %s %d", r.RemoteAddr, r.Method, r.URL, iw.status, http.StatusText(iw.status), iw.written)
-	})
-}
-
-func commonRespHeaders(h http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Add("Server", fmt.Sprintf("%s %s", progName, progVersion))
-		h.ServeHTTP(w, r)
-	})
-}
-
-func limitReqs(h http.Handler, n uint, limitReached chan struct{}) http.Handler {
-	if n == 0 { // 0 means unlimited requests.
-		return h
-	}
+func limitReqs(n uint, done chan bool, next http.HandlerFunc) http.HandlerFunc {
 	var mu sync.Mutex
-	var once sync.Once
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		if n == 0 {
 			mu.Unlock()
-			httpSendError(w, nil, 503)
+			http.Error(w, http.StatusText(503), 503)
 			return
 		}
 		n--
-		mu.Unlock()
-		h.ServeHTTP(w, r)
-		mu.Lock()
 		if n == 0 {
-			once.Do(func() { close(limitReached) })
+			defer func() { done <- true }()
 		}
 		mu.Unlock()
-	})
-}
 
-func basicAuth(h http.Handler, user, pass string) http.Handler {
-	if user == "" || pass == "" { // empty user or pass means no auth.
-		return h
-	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		u, p, ok := r.BasicAuth()
-		if ok && u == user && p == pass {
-			h.ServeHTTP(w, r)
-			return
-		}
-		w.Header().Add("WWW-Authenticate", fmt.Sprintf(`Basic realm=%q, charset="utf-8"`, progName))
-		httpSendError(w, nil, 401)
-	})
-}
-
-func sendFile(p payload, disp bool) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		rd, err := p.reader()
-		var mtime time.Time
-		if err == nil {
-			mtime, err = p.modTime()
-		}
-		if err != nil {
-			httpSendError(w, err, 500)
-			return
-		}
-		if disp {
-			w.Header().Add("Content-Disposition", fmt.Sprintf("attachment; filename=%q", p.fname))
-		}
-		if p.isStream {
-			// in stream mode we can't seek the reader to get
-			// content size or serve ranges like http.ServeContent() does.
-			// NOTE: *os.File is a io.ReadSeeker but os.Stdin won't seek.
-			httpCopy(w, rd)
-			return
-		}
-		http.ServeContent(w, r, p.fname, mtime, rd.(io.ReadSeeker))
+		next.ServeHTTP(w, r)
 	}
 }
 
-func sendChecksum(p payload, hashNew func() hash.Hash) http.HandlerFunc {
-	var once sync.Once
-	var sum string
+func offer(fpath, fname string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		once.Do(func() {
-			rd, err := p.reader()
+		if r.Method != "GET" {
+			http.Error(w, http.StatusText(405), 405)
+			return
+		}
+
+		f := os.Stdin
+		if fpath != "-" {
+			var err error
+			f, err = os.Open(fpath)
 			if err != nil {
-				log.Println(err)
+				errmsg(err.Error())
+				http.Error(w, http.StatusText(500), 500)
 				return
 			}
-			h := hashNew()
-			if _, err := io.Copy(h, rd); err != nil {
-				log.Println(err)
-				return
-			}
-			sum = fmt.Sprintf("%x  %s\n", h.Sum(nil), p.fname)
-		})
-		if sum == "" {
-			httpSendError(w, fmt.Errorf("sendChecksum: %w", errEmptySum), 500)
+		}
+		defer f.Close()
+
+		if fname != "" {
+			w.Header().Add("Content-Disposition", "attachment; filename="+fname)
+		}
+		if _, err := io.Copy(w, f); err != nil {
+			errmsg(err.Error())
 			return
 		}
-		httpCopy(w, strings.NewReader(sum))
 	}
 }
 
-func sendError(code int) http.HandlerFunc {
+func receive(fpath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		httpSendError(w, nil, code)
-	}
-}
+		if r.Method != "POST" && r.Method != "PUT" {
+			http.Error(w, http.StatusText(405), 405)
+			return
+		}
 
-func httpSendError(w http.ResponseWriter, err error, code int) {
-	if err != nil {
-		log.Println(err)
-	}
-	http.Error(w, fmt.Sprintf("%d %s", code, http.StatusText(code)), code)
-}
+		mr, err := r.MultipartReader()
+		if err != nil {
+			errmsg(err.Error())
+			http.Error(w, http.StatusText(400), 400)
+			return
+		}
 
-func httpCopy(w http.ResponseWriter, rd io.Reader) {
-	if _, err := io.Copy(w, rd); err != nil {
-		log.Println(err)
-		// it's too late to send 500 or any other status.
+		f := os.Stdout
+		if fpath != "-" {
+			var err error
+			f, err = os.Create(fpath)
+			if err != nil {
+				errmsg(err.Error())
+				http.Error(w, http.StatusText(500), 500)
+				return
+			}
+		}
+		defer f.Close()
+
+		for {
+			part, err := mr.NextPart()
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return
+				}
+				errmsg(err.Error())
+				http.Error(w, http.StatusText(400), 400)
+				return
+			}
+			if _, err := io.Copy(f, part); err != nil {
+				errmsg(err.Error())
+				http.Error(w, http.StatusText(500), 500)
+				return
+			}
+		}
 	}
 }
