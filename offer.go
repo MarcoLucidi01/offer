@@ -31,27 +31,36 @@ func main() {
 	if flag.NArg() > 1 {
 		die("too many files, use zip or tar to offer multiple files")
 	}
+
 	fpath := "-"
 	if flag.NArg() == 1 {
 		fpath = flag.Args()[0]
 	}
-	if fpath == "-" && *flagNReqs > 1 {
-		die("can't offer stdin more than once")
-	}
-	if fpath != "-" && *flagFname == "@" {
-		*flagFname = fpath
-	}
-	if *flagFname != "" {
-		*flagFname = filepath.Base(*flagFname)
-	}
 
 	done := make(chan bool)
-	handler := limitReqs(*flagNReqs, done, offer(fpath, *flagFname))
+	var handler http.HandlerFunc
 	if *flagReceive {
-		handler = limitReqs(1, done, receive(fpath))
+		if *flagNReqs > 1 {
+			die("can't receive more than one file")
+		}
+		if *flagFname != "" {
+			fpath = *flagFname
+		}
+		handler = limitReqs("POST", 1, done, receive(fpath))
+	} else {
+		if fpath == "-" && *flagNReqs > 1 {
+			die("can't offer stdin more than once")
+		}
+		if fpath != "-" && *flagFname == "@" {
+			*flagFname = fpath
+		}
+		if *flagFname != "" {
+			*flagFname = filepath.Base(*flagFname)
+		}
+		handler = limitReqs("GET", *flagNReqs, done, offer(fpath, *flagFname))
 	}
-	http.HandleFunc("/", handler)
 
+	http.HandleFunc("/", handler)
 	srv := http.Server{Addr: *flagAddr}
 	go func() {
 		<-done
@@ -76,9 +85,14 @@ func errmsg(msg ...interface{}) {
 	fmt.Fprintln(os.Stderr, msg...)
 }
 
-func limitReqs(n uint, done chan bool, next http.HandlerFunc) http.HandlerFunc {
+func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) http.HandlerFunc {
 	var mu sync.Mutex
 	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != method {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		mu.Lock()
 		if n == 0 {
 			mu.Unlock()
