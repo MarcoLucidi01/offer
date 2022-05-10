@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	_ "embed"
 	"errors"
 	"flag"
 	"fmt"
@@ -13,6 +14,12 @@ import (
 	"path/filepath"
 	"sync"
 )
+
+//go:embed upload.html
+var uploadPage []byte
+
+//go:embed success.html
+var successPage []byte
 
 func main() {
 	flagAddr := flag.String("a", ":8080", "server address:port")
@@ -119,7 +126,11 @@ func offer(fpath, fname string) http.HandlerFunc {
 
 func receive(fpath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "POST" && r.Method != "PUT" {
+		if r.Method == "GET" {
+			w.Write(uploadPage)
+			return
+		}
+		if r.Method != "POST" {
 			http.Error(w, http.StatusText(405), 405)
 			return
 		}
@@ -147,6 +158,7 @@ func receive(fpath string) http.HandlerFunc {
 			part, err := mr.NextPart()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
+					w.Write(successPage)
 					return
 				}
 				errmsg(err.Error())
