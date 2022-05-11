@@ -71,7 +71,7 @@ func main() {
 		case <-sig:
 		}
 		if err := srv.Shutdown(context.Background()); err != nil {
-			errmsg(err.Error())
+			printError(err)
 		}
 		done <- true
 	}()
@@ -82,13 +82,12 @@ func main() {
 }
 
 func die(reason string) {
-	errmsg(reason)
+	printError(errors.New(reason))
 	os.Exit(1)
 }
 
-func errmsg(msg ...interface{}) {
-	fmt.Fprint(os.Stderr, "error: ")
-	fmt.Fprintln(os.Stderr, msg...)
+func printError(err error) {
+	fmt.Fprintf(os.Stderr, "error: %s\n", err)
 }
 
 func sendStatusPage(w http.ResponseWriter, status int) {
@@ -133,7 +132,7 @@ func offer(fpath, fname string) http.HandlerFunc {
 			var err error
 			f, err = os.Open(fpath)
 			if err != nil {
-				errmsg(err.Error())
+				printError(err)
 				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
@@ -144,7 +143,7 @@ func offer(fpath, fname string) http.HandlerFunc {
 			w.Header().Add("Content-Disposition", "attachment; filename="+fname)
 		}
 		if _, err := io.Copy(w, f); err != nil {
-			errmsg(err.Error())
+			printError(err)
 			return
 		}
 	}
@@ -163,7 +162,7 @@ func receive(fpath string) http.HandlerFunc {
 
 		mr, err := r.MultipartReader()
 		if err != nil {
-			errmsg(err.Error())
+			printError(err)
 			sendStatusPage(w, http.StatusBadRequest)
 			return
 		}
@@ -173,7 +172,7 @@ func receive(fpath string) http.HandlerFunc {
 			var err error
 			f, err = os.Create(fpath)
 			if err != nil {
-				errmsg(err.Error())
+				printError(err)
 				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
@@ -187,12 +186,12 @@ func receive(fpath string) http.HandlerFunc {
 					sendStatusPage(w, http.StatusOK)
 					return
 				}
-				errmsg(err.Error())
+				printError(err)
 				sendStatusPage(w, http.StatusBadRequest)
 				return
 			}
 			if _, err := io.Copy(f, part); err != nil {
-				errmsg(err.Error())
+				printError(err)
 				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
