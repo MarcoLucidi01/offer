@@ -11,8 +11,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sync"
+	"syscall"
 )
 
 //go:embed upload.html
@@ -62,8 +64,15 @@ func main() {
 
 	http.HandleFunc("/", handler)
 	srv := http.Server{Addr: *flagAddr}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+
 	go func() {
-		<-done
+		select {
+		case <-done:
+		case <-sig:
+		}
 		if err := srv.Shutdown(context.Background()); err != nil {
 			errmsg(err.Error())
 		}
