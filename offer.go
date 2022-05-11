@@ -20,9 +20,6 @@ import (
 //go:embed upload.html
 var uploadPage []byte
 
-//go:embed success.html
-var successPage []byte
-
 func main() {
 	flagAddr := flag.String("a", ":8080", "server address:port")
 	flagFname := flag.String("f", "", "filename for content disposition header")
@@ -94,6 +91,12 @@ func errmsg(msg ...interface{}) {
 	fmt.Fprintln(os.Stderr, msg...)
 }
 
+func sendStatusPage(w http.ResponseWriter, status int) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(status)
+	fmt.Fprintf(w, "<!DOCTYPE html>\n<h1>%s</h1>\n", http.StatusText(status))
+}
+
 func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) http.HandlerFunc {
 	var mu sync.Mutex
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -105,7 +108,7 @@ func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) htt
 		mu.Lock()
 		if n == 0 {
 			mu.Unlock()
-			http.Error(w, http.StatusText(503), 503)
+			sendStatusPage(w, http.StatusServiceUnavailable)
 			return
 		}
 		n--
@@ -121,7 +124,7 @@ func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) htt
 func offer(fpath, fname string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
-			http.Error(w, http.StatusText(405), 405)
+			sendStatusPage(w, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -131,7 +134,7 @@ func offer(fpath, fname string) http.HandlerFunc {
 			f, err = os.Open(fpath)
 			if err != nil {
 				errmsg(err.Error())
-				http.Error(w, http.StatusText(500), 500)
+				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
@@ -154,14 +157,14 @@ func receive(fpath string) http.HandlerFunc {
 			return
 		}
 		if r.Method != "POST" {
-			http.Error(w, http.StatusText(405), 405)
+			sendStatusPage(w, http.StatusMethodNotAllowed)
 			return
 		}
 
 		mr, err := r.MultipartReader()
 		if err != nil {
 			errmsg(err.Error())
-			http.Error(w, http.StatusText(400), 400)
+			sendStatusPage(w, http.StatusBadRequest)
 			return
 		}
 
@@ -171,7 +174,7 @@ func receive(fpath string) http.HandlerFunc {
 			f, err = os.Create(fpath)
 			if err != nil {
 				errmsg(err.Error())
-				http.Error(w, http.StatusText(500), 500)
+				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
@@ -181,16 +184,16 @@ func receive(fpath string) http.HandlerFunc {
 			part, err := mr.NextPart()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
-					w.Write(successPage)
+					sendStatusPage(w, http.StatusOK)
 					return
 				}
 				errmsg(err.Error())
-				http.Error(w, http.StatusText(400), 400)
+				sendStatusPage(w, http.StatusBadRequest)
 				return
 			}
 			if _, err := io.Copy(f, part); err != nil {
 				errmsg(err.Error())
-				http.Error(w, http.StatusText(500), 500)
+				sendStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
