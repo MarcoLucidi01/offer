@@ -22,15 +22,16 @@ import (
 var uploadPage []byte
 
 func main() {
-	flagAddr := flag.String("a", ":8080", "server address:port")
 	flagFname := flag.String("f", "", "filename for content disposition header")
 	flagNReqs := flag.Uint("n", 1, "number of requests allowed")
+	flagPort := flag.Uint("p", 8080, "server port")
 	flagReceive := flag.Bool("r", false, "receive mode")
 	flagUrl := flag.Bool("u", false, "print server url")
 	flag.Parse()
 
+	addr := fmt.Sprintf(":%d", *flagPort)
 	if *flagUrl {
-		if err := printURL(*flagAddr); err != nil {
+		if err := printURL(addr); err != nil {
 			die(err.Error())
 		}
 		return
@@ -69,7 +70,7 @@ func main() {
 	}
 
 	http.HandleFunc("/", handler)
-	srv := http.Server{Addr: *flagAddr}
+	srv := http.Server{Addr: addr}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
