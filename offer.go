@@ -9,6 +9,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -25,7 +26,15 @@ func main() {
 	flagFname := flag.String("f", "", "filename for content disposition header")
 	flagNReqs := flag.Uint("n", 1, "number of requests allowed")
 	flagReceive := flag.Bool("r", false, "receive mode")
+	flagUrl := flag.Bool("u", false, "print server url")
 	flag.Parse()
+
+	if *flagUrl {
+		if err := printURL(*flagAddr); err != nil {
+			die(err.Error())
+		}
+		return
+	}
 
 	if flag.NArg() > 1 {
 		die("too many files, use zip or tar to offer multiple files")
@@ -88,6 +97,24 @@ func die(reason string) {
 
 func printError(err error) {
 	fmt.Fprintf(os.Stderr, "error: %s\n", err)
+}
+
+func printURL(addrStr string) error {
+	addr, err := net.ResolveTCPAddr("tcp", addrStr)
+	if err != nil {
+		return err
+	}
+
+	// https://stackoverflow.com/a/37382208/13527856
+	conn, err := net.Dial("udp", "255.255.255.255:99")
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
+	fmt.Printf("http://%s:%d\n", ip, addr.Port)
+	return nil
 }
 
 func sendStatusPage(w http.ResponseWriter, status int) {
