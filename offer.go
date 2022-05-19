@@ -26,16 +26,8 @@ func main() {
 	flagNReqs := flag.Uint("n", 1, "number of requests allowed")
 	flagPort := flag.Uint("p", 8080, "server port")
 	flagReceive := flag.Bool("r", false, "receive mode")
-	flagUrl := flag.Bool("u", false, "print server url")
+	flagUrl := flag.Bool("u", false, "print URL after server starts listening")
 	flag.Parse()
-
-	addr := fmt.Sprintf(":%d", *flagPort)
-	if *flagUrl {
-		if err := printURL(addr); err != nil {
-			die(err.Error())
-		}
-		return
-	}
 
 	if flag.NArg() > 1 {
 		die("too many files, use zip or tar to offer multiple files")
@@ -70,11 +62,23 @@ func main() {
 	}
 
 	http.HandleFunc("/", handler)
-	srv := http.Server{Addr: addr}
+	srv := http.Server{Addr: fmt.Sprintf(":%d", *flagPort)}
+
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		die(err.Error())
+	}
+
+	if *flagUrl {
+		if err := printURL(srv.Addr); err != nil {
+			// don't die, the server is already listening, this
+			// error should never happen.
+			printError(err)
+		}
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-
 	go func() {
 		select {
 		case <-done:
@@ -85,7 +89,7 @@ func main() {
 		}
 		done <- true
 	}()
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		die(err.Error())
 	}
 	<-done
@@ -114,7 +118,8 @@ func printURL(addrStr string) error {
 	defer conn.Close()
 
 	ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
-	fmt.Printf("http://%s:%d\n", ip, addr.Port)
+	// don't pollute stdout
+	fmt.Fprintf(os.Stderr, "http://%s:%d\n", ip, addr.Port)
 	return nil
 }
 
