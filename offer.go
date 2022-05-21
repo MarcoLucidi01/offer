@@ -30,7 +30,7 @@ func main() {
 	flag.Parse()
 
 	if flag.NArg() > 1 {
-		die("too many files, use zip or tar to offer multiple files")
+		die("too many files, use zip or tar")
 	}
 
 	fpath := "-"
@@ -42,7 +42,7 @@ func main() {
 	var handler http.HandlerFunc
 	if *flagReceive {
 		if *flagNReqs > 1 {
-			die("can't receive more than one file")
+			die("can't receive more than one file, use zip or tar")
 		}
 		if *flagFname != "" {
 			fpath = *flagFname
@@ -71,9 +71,7 @@ func main() {
 
 	if *flagUrl {
 		if err := printURL(ln.Addr()); err != nil {
-			// don't die, the server is already listening, this
-			// error should never happen.
-			printError(err)
+			printError(err) // don't die, the server is already listening
 		}
 	}
 
@@ -118,7 +116,7 @@ func printURL(addr net.Addr) error {
 	return nil
 }
 
-func sendStatusPage(w http.ResponseWriter, status int) {
+func writeStatusPage(w http.ResponseWriter, status int) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	fmt.Fprintf(w, "<!DOCTYPE html>\n<h1>%s</h1>\n", http.StatusText(status))
@@ -135,7 +133,7 @@ func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) htt
 		mu.Lock()
 		if n == 0 {
 			mu.Unlock()
-			sendStatusPage(w, http.StatusServiceUnavailable)
+			writeStatusPage(w, http.StatusServiceUnavailable)
 			return
 		}
 		n--
@@ -151,7 +149,7 @@ func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) htt
 func offer(fpath, fname string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
-			sendStatusPage(w, http.StatusMethodNotAllowed)
+			writeStatusPage(w, http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -161,7 +159,7 @@ func offer(fpath, fname string) http.HandlerFunc {
 			f, err = os.Open(fpath)
 			if err != nil {
 				printError(err)
-				sendStatusPage(w, http.StatusInternalServerError)
+				writeStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
@@ -184,14 +182,14 @@ func receive(fpath string) http.HandlerFunc {
 			return
 		}
 		if r.Method != "POST" {
-			sendStatusPage(w, http.StatusMethodNotAllowed)
+			writeStatusPage(w, http.StatusMethodNotAllowed)
 			return
 		}
 
 		mr, err := r.MultipartReader()
 		if err != nil {
 			printError(err)
-			sendStatusPage(w, http.StatusBadRequest)
+			writeStatusPage(w, http.StatusBadRequest)
 			return
 		}
 
@@ -201,7 +199,7 @@ func receive(fpath string) http.HandlerFunc {
 			f, err = os.Create(fpath)
 			if err != nil {
 				printError(err)
-				sendStatusPage(w, http.StatusInternalServerError)
+				writeStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
@@ -211,16 +209,16 @@ func receive(fpath string) http.HandlerFunc {
 			part, err := mr.NextPart()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
-					sendStatusPage(w, http.StatusOK)
+					writeStatusPage(w, http.StatusOK)
 					return
 				}
 				printError(err)
-				sendStatusPage(w, http.StatusBadRequest)
+				writeStatusPage(w, http.StatusBadRequest)
 				return
 			}
 			if _, err := io.Copy(f, part); err != nil {
 				printError(err)
-				sendStatusPage(w, http.StatusInternalServerError)
+				writeStatusPage(w, http.StatusInternalServerError)
 				return
 			}
 		}
