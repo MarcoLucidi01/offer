@@ -70,7 +70,7 @@ func main() {
 	}
 
 	if *flagUrl {
-		if err := printURL(srv.Addr); err != nil {
+		if err := printURL(ln.Addr()); err != nil {
 			// don't die, the server is already listening, this
 			// error should never happen.
 			printError(err)
@@ -104,12 +104,7 @@ func printError(err error) {
 	fmt.Fprintf(os.Stderr, "error: %s\n", err)
 }
 
-func printURL(addrStr string) error {
-	addr, err := net.ResolveTCPAddr("tcp", addrStr)
-	if err != nil {
-		return err
-	}
-
+func printURL(addr net.Addr) error {
 	// https://stackoverflow.com/a/37382208/13527856
 	conn, err := net.Dial("udp", "255.255.255.255:99")
 	if err != nil {
@@ -118,8 +113,8 @@ func printURL(addrStr string) error {
 	defer conn.Close()
 
 	ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
-	// don't pollute stdout
-	fmt.Fprintf(os.Stderr, "http://%s:%d\n", ip, addr.Port)
+	port := addr.(*net.TCPAddr).Port
+	fmt.Fprintf(os.Stderr, "http://%s:%d\n", ip, port) // don't pollute stdout
 	return nil
 }
 
