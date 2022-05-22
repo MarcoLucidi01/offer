@@ -68,11 +68,8 @@ func main() {
 	if err != nil {
 		die(err.Error())
 	}
-
 	if *flagUrl {
-		if err := printURL(ln.Addr()); err != nil {
-			printError(err) // don't die, the server is already listening
-		}
+		printURL(ln.Addr().(*net.TCPAddr).Port)
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -102,18 +99,14 @@ func printError(err error) {
 	fmt.Fprintf(os.Stderr, "error: %s\n", err)
 }
 
-func printURL(addr net.Addr) error {
+func printURL(port int) {
+	host := "localhost"
 	// https://stackoverflow.com/a/37382208/13527856
-	conn, err := net.Dial("udp", "255.255.255.255:99")
-	if err != nil {
-		return err
+	if conn, err := net.Dial("udp", "255.255.255.255:99"); err == nil {
+		host = conn.LocalAddr().(*net.UDPAddr).IP.String()
+		defer conn.Close()
 	}
-	defer conn.Close()
-
-	ip := conn.LocalAddr().(*net.UDPAddr).IP.String()
-	port := addr.(*net.TCPAddr).Port
-	fmt.Fprintf(os.Stderr, "http://%s:%d\n", ip, port) // don't pollute stdout
-	return nil
+	fmt.Fprintf(os.Stderr, "http://%s:%d\n", host, port) // don't pollute stdout
 }
 
 func writeStatusPage(w http.ResponseWriter, status int) {
