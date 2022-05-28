@@ -200,7 +200,7 @@ func receive(fpath string) http.HandlerFunc {
 		}
 		defer f.Close()
 
-		fname := ""
+		partfname := ""
 		for {
 			part, err := mr.NextPart()
 			if err != nil {
@@ -213,8 +213,8 @@ func receive(fpath string) http.HandlerFunc {
 				break
 			}
 
-			if fpath == "@" && fname == "" {
-				fname = part.FileName()
+			if fpath == "@" && partfname == "" {
+				partfname = part.FileName()
 			}
 
 			if _, err := io.Copy(f, part); err != nil {
@@ -224,32 +224,32 @@ func receive(fpath string) http.HandlerFunc {
 			}
 		}
 
-		name := fpath
-		if name == "-" {
+		fname := fpath
+		if fname == "-" {
 			return
 		}
-		if name == "@" {
-			if fname == "" {
+		if fname == "@" {
+			if partfname == "" {
 				printError(fmt.Errorf("content disposition filename missing"))
 				return
 			}
-			name = fname
+			fname = partfname
 		}
-		if err := safeRename(f.Name(), name); err != nil {
+		if err := safeRename(f.Name(), fname); err != nil {
 			printError(err)
 		}
 	}
 }
 
 func safeRename(oldpath, newpath string) error {
-	name := newpath
+	fpath := newpath
 	for i := 1; i < math.MaxInt32; i++ {
-		err := os.Link(oldpath, name)
+		err := os.Link(oldpath, fpath)
 		if err == nil {
 			return os.Remove(oldpath)
 		}
 		if errors.Is(err, fs.ErrExist) {
-			name = fmt.Sprintf("%s-%d", newpath, i)
+			fpath = fmt.Sprintf("%s-%d", newpath, i)
 			continue
 		}
 		return err
