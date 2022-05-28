@@ -43,13 +43,13 @@ func main() {
 	done := make(chan bool)
 	var handler http.HandlerFunc
 	if *flagReceive {
-		if *flagNReqs > 1 {
-			die("can't receive more than one file, use zip or tar")
-		}
 		if *flagFname != "" {
 			fpath = *flagFname
 		}
-		handler = limitReqs("POST", 1, done, receive(fpath))
+		if fpath == "-" && *flagNReqs > 1 {
+			die("can't receive to stdout more than once")
+		}
+		handler = limitReqs("POST", *flagNReqs, done, receive(fpath))
 	} else {
 		if fpath == "-" && *flagNReqs > 1 {
 			die("can't offer stdin more than once")
