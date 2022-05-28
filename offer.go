@@ -9,6 +9,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -189,7 +191,7 @@ func receive(fpath string) http.HandlerFunc {
 		f := os.Stdout
 		if fpath != "-" {
 			var err error
-			f, err = os.Create(fpath)
+			f, err = os.CreateTemp(".", "offer-receive-")
 			if err != nil {
 				printError(err)
 				writeStatusPage(w, http.StatusInternalServerError)
@@ -198,22 +200,59 @@ func receive(fpath string) http.HandlerFunc {
 		}
 		defer f.Close()
 
+		fname := ""
 		for {
 			part, err := mr.NextPart()
 			if err != nil {
 				if errors.Is(err, io.EOF) {
 					writeStatusPage(w, http.StatusOK)
-					return
+					break
 				}
 				printError(err)
 				writeStatusPage(w, http.StatusBadRequest)
-				return
+				break
 			}
+
+			if fpath == "@" && fname == "" {
+				fname = part.FileName()
+			}
+
 			if _, err := io.Copy(f, part); err != nil {
 				printError(err)
 				writeStatusPage(w, http.StatusInternalServerError)
-				return
+				break
 			}
 		}
+
+		name := fpath
+		if name == "-" {
+			return
+		}
+		if name == "@" {
+			if fname == "" {
+				printError(fmt.Errorf("content disposition filename missing"))
+				return
+			}
+			name = fname
+		}
+		if err := safeRename(f.Name(), name); err != nil {
+			printError(err)
+		}
 	}
+}
+
+func safeRename(oldpath, newpath string) error {
+	name := newpath
+	for i := 1; i < math.MaxInt32; i++ {
+		err := os.Link(oldpath, name)
+		if err == nil {
+			return os.Remove(oldpath)
+		}
+		if errors.Is(err, fs.ErrExist) {
+			name = fmt.Sprintf("%s-%d", newpath, i)
+			continue
+		}
+		return err
+	}
+	return fmt.Errorf("safe rename %q %q: %w", oldpath, newpath, fs.ErrExist)
 }

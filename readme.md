@@ -42,7 +42,7 @@ offer a file:
 
     $ offer hello.txt
 
-offer a file multiple (5 in this case) times:
+offer a file multiple times (5 in this case):
 
     $ offer -n 5 hello.txt
 
@@ -79,6 +79,10 @@ return a basic upload page)
 receive multiple files (using `tar`):
 
     $ offer -r | tar -xvf -
+
+use content disposition filename as filename for received file:
+
+    $ offer -r -f @
 
 [license][2]
 
