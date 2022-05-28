@@ -54,12 +54,6 @@ func main() {
 		if fpath == "-" && *flagNReqs > 1 {
 			die("can't offer stdin more than once")
 		}
-		if fpath != "-" && *flagFname == "@" {
-			*flagFname = fpath
-		}
-		if *flagFname != "" {
-			*flagFname = filepath.Base(*flagFname)
-		}
 		handler = limitReqs("GET", *flagNReqs, done, offer(fpath, *flagFname))
 	}
 
@@ -142,6 +136,12 @@ func limitReqs(method string, n uint, done chan bool, next http.HandlerFunc) htt
 }
 
 func offer(fpath, fname string) http.HandlerFunc {
+	if fpath != "-" && fname == "@" {
+		fname = fpath
+	}
+	if fname != "" {
+		fname = filepath.Base(fname)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" {
 			writeStatusPage(w, http.StatusMethodNotAllowed)
