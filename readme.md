@@ -42,13 +42,38 @@ offer a file:
 
     $ offer hello.txt
 
-offer a file multiple times (5 in this case):
+    ===
 
-    $ offer -n 5 hello.txt
+    $ curl http://192.168.100.123:8080
+    hello world
+
+offer a file multiple times (3 in this case):
+
+    $ offer -n 3 hello.txt
+
+    ===
+
+    $ curl http://192.168.100.123:8080
+    hello world
+    $ curl http://192.168.100.123:8080
+    hello world
+    $ curl http://192.168.100.123:8080
+    hello world
 
 offer a file with [content disposition][1] attachment header:
 
     $ offer -f @ hello.txt
+
+    ===
+
+    $ curl -i http://192.168.100.123:8080
+    HTTP/1.1 200 OK
+    Content-Disposition: attachment; filename=hello.txt
+    Date: Sat, 28 May 2022 18:57:40 GMT
+    Content-Length: 12
+    Content-Type: text/plain; charset=utf-8
+
+    hello world
 
 (`@` means use the filename (`hello.txt` in this case) as content disposition filename)
 
@@ -56,11 +81,22 @@ offer `stdin`:
 
     $ echo hello world | offer
 
+    ===
+
+    $ curl http://192.168.100.123:8080
+    hello world
+
 (`stdin` can't be offered multiple times)
 
 offer multiple files:
 
     $ tar -czf - foo.txt bar.pdf baz.png | offer -f foo.tar.gz
+
+    ===
+
+    $ curl -s http://192.168.100.123:8080 | tar -xzf -
+    $ ls
+    bar.pdf  baz.png  foo.txt
 
 (you can of course use `zip` or whatever)
 
@@ -68,21 +104,59 @@ offer a folder:
 
     $ tar -czf - ~/music | offer -f music.tar.gz
 
+    ===
+
+    $ curl -s http://192.168.100.123:8080 | tar -xzf -
+    $ ls
+    eminem
+    pink floyd
+    the doors
+    ...
+
 receive a file:
 
     $ offer -r -u hello.txt
     http://192.168.100.123:8080
+    $ more hello.txt
+    hello world
 
-(only *one* `POST` request will be allowed in receive mode. a `GET` request will
-return a basic upload page)
+    ===
+
+    $ curl -F 'file=@hello.txt' http://192.168.100.123:8080
+    <!DOCTYPE html>
+    <h1>OK</h1>
+
+(a `GET` request will return a basic upload page)
+
+    $ curl http://192.168.100.123:8080
+    <!DOCTYPE html>
+    <form method="POST" action="/" enctype="multipart/form-data">
+            <input type="file" name="file" />
+            <button type="submbit">upload</button>
+    </form>
 
 receive multiple files (using `tar`):
 
     $ offer -r | tar -xvf -
+    foo.txt
+    bar.pdf
+    baz.png
+
+    ===
+
+    $ tar -cf - foo.txt bar.pdf baz.png | curl -F 'file=@-' http://192.168.100.123:8080
 
 use content disposition filename as filename for received file:
 
     $ offer -r -f @
+    $ more hello.txt
+    hello world
+
+    ===
+
+    $ curl -F 'file=@hello.txt' http://192.168.100.123:8080
+    <!DOCTYPE html>
+    <h1>OK</h1>
 
 [license][2]
 
